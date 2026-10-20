@@ -1,0 +1,42 @@
+name: Сборка exe для Windows
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - run: pyinstaller --clean --noconfirm build.spec
+      - name: Самопроверка внутри exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          Write-Host "собран:" $exe.Name ([math]::Round($exe.Length/1MB,1)) "МБ"
+          New-Item -ItemType Directory -Force st | Out-Null
+          $out = Join-Path (Resolve-Path st) "result.txt"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList @("--selftest", $out) -PassThru
+          $done = $p.WaitForExit(120000)
+          if (-not $done) { $p.Kill() }
+          if (-not (Test-Path $out)) { throw "результат самопроверки не записан (завершилась: $done)" }
+          Get-Content $out -Encoding utf8
+          if (-not ((Get-Content $out -Raw -Encoding utf8) -match "OK")) { throw "самопроверка не прошла" }
+      - name: Выложить exe в релиз
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          gh release create "v${{ github.run_number }}" $exe.FullName --title "Сборка ${{ github.run_number }}" --notes "exe для Windows, самопроверка пройдена"
