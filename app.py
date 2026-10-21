@@ -216,21 +216,40 @@ def main():
         selftest(sys.argv[i+1] if len(sys.argv) > i+1 else 'selftest.txt')
         return
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    folder = args[0] if args else None
-    if not folder:
-        from tkinter import filedialog, messagebox
-        root = build_gui()
-        folder = filedialog.askdirectory(title='Папка с единой записью по машинам')
-        if not folder:
+    # Папка по умолчанию — та, где лежит программа (exe). Диспетчеру ничего выбирать не нужно:
+    # кладёт книги единой записи рядом с программой и запускает. Аргумент перекрывает.
+    if args:
+        folder = args[0]
+    elif getattr(sys, 'frozen', False):
+        folder = os.path.dirname(sys.executable)
+    else:
+        folder = os.getcwd()
+    gui = getattr(sys, 'frozen', False) and not args
+    def show(title, text, err=False):
+        if gui:
+            from tkinter import messagebox
+            build_gui()
+            (messagebox.showerror if err else messagebox.showinfo)(title, text)
+        else:
+            print(text)
+    try:
+        res = run(folder, log=lambda *a: None)
+        n = len(res['rows']); rst = res.get('rstats', {})
+        if n == 0:
+            show('Общий журнал',
+                 'В этой папке не нашёл данных.\n\nПоложите книги единой записи (например '
+                 '"Тяжелая техника.xlsx") в эту же папку, рядом с программой, и запустите снова.')
             return
-        lines = []
-        try:
-            run(folder, log=lines.append)
-            messagebox.showinfo('Общий журнал', 'Готово.\n' + '\n'.join(lines))
-        except Exception as e:
-            messagebox.showerror('Общий журнал', 'Ошибка: %s' % e)
-        return
-    run(folder)
+        show('Общий журнал',
+             'Готово.\n\nОбработано строк: %d\nМашин в расходе: %s, реализация: %s руб\n\n'
+             'Создано в этой папке, рядом с программой:\n  Рапорт (собран).xlsx\n  '
+             'Расход-реализация (собран).xlsx\n\n'
+             'Рапорт по топливу и пробегу заполняется, когда в единой записи внесены топливные '
+             'колонки (спидометр, заправка). Пока они пустые, рапорт нулевой — это нормально, '
+             'стоимость работ считается в Расход-реализация.'
+             % (n, rst.get('машин'), rst.get('реализация')))
+    except Exception as e:
+        show('Общий журнал', 'Ошибка: %s' % e, err=True)
 
 if __name__ == '__main__':
     main()
