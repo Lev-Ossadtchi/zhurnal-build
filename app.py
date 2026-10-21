@@ -8,6 +8,11 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 POST = ['Газпром КП','Лукойл','Газпром ЦХХ','Кушва бензовоз','Кушва база','ИП Белай Т.В.','УралКонтрактНефть','Наличка','Колонка']
+# Статьи затрат (по оборотке, в конце месяца). Разносятся отдельными колонками,
+# а не одной суммой. Колонку с таким названием (любой регистр) программа ищет в
+# единой записи. Ремонт принимает и старое имя «Затраты на ремонт».
+COST_ARTICLES = ['ГСМ','Страховка','Обслуживание','Запчасти','Ремонт','Прочее']
+COST_SYNS = {'Ремонт': ('ремонт','затраты на ремонт')}
 HEAD = PatternFill('solid', fgColor='DDE6F0'); BOLD = Font(bold=True)
 THIN = Border(*[Side('thin', color='B0B0B0')]*4)
 
@@ -54,8 +59,8 @@ def read_edinaya(folder):
                     glonas=num(gi(row,'глонас','глонасс')),
                     fuel_rub=num(gi(row,'заправка руб','заправка рубли','заправка сумма','заправка дт руб')),
                     price=num(gi(row,'цена 1 часа работы','цена','цена 1 часа')),
-                    remont=num(gi(row,'затраты на ремонт','ремонт')),
-                    fuel_src=str(gi(row,'источник заправки','источник') or '').strip()))
+                    fuel_src=str(gi(row,'источник заправки','источник') or '').strip(),
+                    costs={a: num(gi(row, *COST_SYNS.get(a, (a.lower(),)))) for a in COST_ARTICLES}))
     return rows, skipped
 
 def load_norms(folder):
@@ -89,7 +94,8 @@ def build_report(rows, norms, outpath):
             else: norma = round(mch*nm.get('norm',0),1)
             econ = round(norma - fakt, 1)
             zap = {p:'' for p in POST}
-            if r['post'] in zap and r['fuel']: zap[r['post']] = r['fuel']
+            supplier = r['post'] or r.get('fuel_src','')   # «Поставщик» или «Источник заправки» — одно и то же
+            if supplier in zap and r['fuel']: zap[supplier] = r['fuel']
             line = [r['putlist'], r['date'], r['fio'], r['mark'], r['sheet'], r['sp0'] or '', r['sp1'] or '',
                     r['mh0'] or '', r['mh1'] or '', r['bak0'] or ''] + [zap[p] for p in POST] + \
                    [r['fuel'] or '', r['bak1'] or '', mch or '', probeg or '', norma, fakt, econ, r['work'], r['hours'] or '']
@@ -116,28 +122,40 @@ def build_rashod(rows, rem_objs, outpath):
     с разбивкой на сторону и на объекты РЭМ."""
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Расход-реализация'
     ws.append(['Расход и реализация по машинам (собрано из единой записи)'])
-    ws.append(['Машина','Марка','Заправка ДТ, руб','Затраты на ремонт, руб','Реализация на сторону, руб','Реализация на объекты РЭМ, руб','Итого реализация, руб'])
+    header = (['Машина','Марка','Заправка ДТ, руб'] + ['%s, руб' % a for a in COST_ARTICLES]
+              + ['Итого затрат, руб','Реализация на сторону, руб','Реализация на объекты РЭМ, руб','Итого реализация, руб'])
+    ws.append(header)
     for c in ws[2]: c.font, c.fill, c.border = BOLD, HEAD, THIN
     agg = {}
     for r in rows:
         k = (r['sheet'], r['mark'])
-        a = agg.setdefault(k, dict(fuel=0.0, remont=0.0, storona=0.0, rem=0.0))
-        a['fuel'] += r.get('fuel_rub', 0.0); a['remont'] += r.get('remont', 0.0)
+        a = agg.setdefault(k, dict(fuel=0.0, costs={x: 0.0 for x in COST_ARTICLES}, storona=0.0, rem=0.0))
+        a['fuel'] += r.get('fuel_rub', 0.0) or 0.0
+        rc = r.get('costs') or {}
+        for x in COST_ARTICLES: a['costs'][x] += rc.get(x, 0.0) or 0.0
         real = (r.get('hours', 0.0) or 0.0) * (r.get('price', 0.0) or 0.0)
         if str(r.get('obj') or '').strip().lower() in rem_objs: a['rem'] += real
         else: a['storona'] += real
-    tot = dict(fuel=0, remont=0, storona=0, rem=0)
+    tot = dict(fuel=0.0, costs={x: 0.0 for x in COST_ARTICLES}, storona=0.0, rem=0.0)
+    ncol = len(header)
     for (sheet, mark), a in sorted(agg.items(), key=lambda x: str(x[0][0])):
-        ws.append([sheet, mark, round(a['fuel']), round(a['remont']), round(a['storona']), round(a['rem']), round(a['storona']+a['rem'])])
+        cost_vals = [round(a['costs'][x]) for x in COST_ARTICLES]
+        itogo_z = round(sum(a['costs'].values()))
+        ws.append([sheet, mark, round(a['fuel'])] + cost_vals
+                  + [itogo_z, round(a['storona']), round(a['rem']), round(a['storona']+a['rem'])])
         for c in ws[ws.max_row]: c.border = THIN
-        for i in (3,4,5,6,7): ws.cell(ws.max_row, i).number_format = '# ##0'
-        for key in tot: tot[key] += a[key]
-    ws.append(['ИТОГО','', round(tot['fuel']), round(tot['remont']), round(tot['storona']), round(tot['rem']), round(tot['storona']+tot['rem'])])
+        for i in range(3, ncol+1): ws.cell(ws.max_row, i).number_format = '# ##0'
+        tot['fuel'] += a['fuel']; tot['storona'] += a['storona']; tot['rem'] += a['rem']
+        for x in COST_ARTICLES: tot['costs'][x] += a['costs'][x]
+    tot_cost_vals = [round(tot['costs'][x]) for x in COST_ARTICLES]
+    ws.append(['ИТОГО','', round(tot['fuel'])] + tot_cost_vals
+              + [round(sum(tot['costs'].values())), round(tot['storona']), round(tot['rem']), round(tot['storona']+tot['rem'])])
     for c in ws[ws.max_row]: c.font, c.border = BOLD, THIN
-    for col,w in zip('ABCDEFG',[16,26,16,18,22,24,18]): ws.column_dimensions[col].width = w
+    widths = [16,26,16] + [14]*len(COST_ARTICLES) + [16,22,24,18]
+    for i,w in enumerate(widths, 1): ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = 'A3'
     wb.save(outpath)
-    return {'машин': len(agg), 'реализация': round(tot['storona']+tot['rem'])}
+    return {'машин': len(agg), 'затраты': round(sum(tot['costs'].values())), 'реализация': round(tot['storona']+tot['rem'])}
 
 def run(folder, log=print):
     rows, skipped = read_edinaya(folder)
@@ -159,11 +177,12 @@ def selftest(outfile):
         ws['A1']='Работа'; ws['A2']='ГАЗ-5204'; ws['B2']='К 839 ОМ'
         ws.append([])
         ws.append(['Дата','№ путевого','Ф.И.О. водителя','Объект','Вид работ','Отработано часов','Цена','Маршрут',
-                   'Спидометр нач','Спидометр кон','Мотосчётчик нач','Мотосчётчик кон','Бак нач','Заправка','Поставщик','Бак кон','Глонас','Заправка руб','Затраты на ремонт'])
+                   'Спидометр нач','Спидометр кон','Мотосчётчик нач','Мотосчётчик кон','Бак нач','Заправка','Поставщик','Бак кон','Глонас','Заправка руб','Затраты на ремонт','Страховка'])
         # день: пробег 100 км, заправка 50 л Лукойл, бак 20->30 => факт=20+50-30=40, норма при 30л/100км = 30
-        # реализация = 8ч x 700 = 5600 (объект ЦХХ не в РЭМ -> на сторону); заправка 3000 руб; ремонт 1000
+        # реализация = 8ч x 700 = 5600 (объект ЦХХ не в РЭМ -> на сторону); заправка 3000 руб
+        # статьи затрат: ремонт 1000 + страховка 500 => итого затрат 1500
         ws.append([datetime.datetime(2026,8,1),'123','Иванов','ЦХХ','перевозка',8,700,'база',
-                   1000,1100,0,0,20,50,'Лукойл',30,0,3000,1000])
+                   1000,1100,0,0,20,50,'Лукойл',30,0,3000,1000,500])
         norms_wb = openpyxl.Workbook(); nw = norms_wb.active; nw.title='Нормы'
         nw.append(['Машина','Категория','Норма','Ед']); nw.append(['ГАЗ-5204','АТ',30,'л/100км'])
         os.makedirs(d, exist_ok=True)
@@ -183,7 +202,9 @@ def selftest(outfile):
         rr = openpyxl.load_workbook(res['out2'])['Расход-реализация']
         rhdr = [c.value for c in rr[2]]; rrow = dict(zip(rhdr, [c.value for c in rr[3]]))
         assert rrow['Заправка ДТ, руб']==3000, rrow['Заправка ДТ, руб']
-        assert rrow['Затраты на ремонт, руб']==1000, rrow['Затраты на ремонт, руб']
+        assert rrow['Ремонт, руб']==1000, rrow['Ремонт, руб']
+        assert rrow['Страховка, руб']==500, rrow['Страховка, руб']
+        assert rrow['Итого затрат, руб']==1500, rrow['Итого затрат, руб']
         assert rrow['Реализация на сторону, руб']==5600, rrow['Реализация на сторону, руб']
         # проверка GUI (tkinter грузится в сборке). Локально на macOS _tkinter может
         # отсутствовать — это ок; на Windows-раннере tkinter есть, и потеря его в сборке — ошибка.
@@ -195,9 +216,9 @@ def selftest(outfile):
             else: raise AssertionError('GUI модуль потерян в сборке: %r' % ge)
         except Exception as ge:
             raise AssertionError('GUI не поднялся: %r' % ge)
-        msg = 'OK рапорт(пробег %d факт %d норма %d) расход(заправка %d ремонт %d реализация %d)' % (
+        msg = 'OK рапорт(пробег %d факт %d норма %d) расход(заправка %d затраты %d реализация %d)' % (
             d2['Пробег'], d2['расход факт'], d2['расход норма'],
-            rrow['Заправка ДТ, руб'], rrow['Затраты на ремонт, руб'], rrow['Реализация на сторону, руб'])
+            rrow['Заправка ДТ, руб'], rrow['Итого затрат, руб'], rrow['Реализация на сторону, руб'])
     except Exception as e:
         import traceback; msg = 'FAIL %r' % (e,)
     with open(outfile,'w',encoding='utf-8') as f: f.write(msg)
