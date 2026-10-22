@@ -129,9 +129,9 @@ def build_report(rows, norms, outpath, suppliers=None):
         cat = norms.get(r['mark'],{}).get('cat','ТТ')
         by_cat.setdefault(cat, []).append(r)
     cols = (['№ путевого','Дата','Ф.И.О.','Марка','Гос.№','спидометр нач','спидометр кон','мотосчётчик нач','мотосчётчик кон','бак нач']
-            + suppliers + ['Заправка общая','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
+            + suppliers + ['Заправка общая','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
     def emit_machine(ws, group):
-        sums = dict(hours=0.0, stoim=0.0, fuel=0.0, probeg=0.0, fakt=0.0, bysup={s:0.0 for s in suppliers})
+        sums = dict(hours=0.0, stoim=0.0, fuel=0.0, glonas=0.0, rashod=0.0, probeg=0.0, fakt=0.0, bysup={s:0.0 for s in suppliers})
         g = sorted(group, key=lambda x: x['date'])
         for r in g:
             nm = norms.get(r['mark'],{})
@@ -140,23 +140,27 @@ def build_report(rows, norms, outpath, suppliers=None):
             if nm.get('unit','').startswith('л/100'): norma = round(probeg*nm.get('norm',0)/100,1)
             else: norma = round(mch*nm.get('norm',0),1)
             econ = round(norma - fakt, 1)
+            rashod = round((r['fuel'] or 0) - (r['glonas'] or 0), 1)   # заправка по чеку минус по ГЛОНАСС
             zap = {s:'' for s in suppliers}
             sup = r['post'] or r.get('fuel_src','')
             if sup in zap and r['fuel']: zap[sup] = r['fuel']
             stoim = r.get('stoim') or ((r.get('hours',0) or 0)*(r.get('price',0) or 0))
             line = [r['putlist'], r['date'], r['fio'], r['mark'], r['sheet'], r['sp0'] or '', r['sp1'] or '',
                     r['mh0'] or '', r['mh1'] or '', r['bak0'] or ''] + [zap[s] for s in suppliers] + \
-                   [r['fuel'] or '', r['bak1'] or '', mch or '', probeg or '', norma, fakt, econ,
+                   [r['fuel'] or '', r['glonas'] or '', rashod if (r['fuel'] or r['glonas']) else '',
+                    r['bak1'] or '', mch or '', probeg or '', norma, fakt, econ,
                     round(stoim) if stoim else '', r['work'], r['hours'] or '']
             ws.append(line); ws.cell(ws.max_row, 2).number_format = 'DD.MM.YYYY'
             sums['hours'] += r['hours'] or 0; sums['stoim'] += stoim or 0; sums['fuel'] += r['fuel'] or 0
+            sums['glonas'] += r['glonas'] or 0; sums['rashod'] += rashod
             sums['probeg'] += probeg; sums['fakt'] += fakt
             for s in suppliers:
                 if isinstance(zap[s], (int, float)): sums['bysup'][s] += zap[s]
         m = g[0]
         itg = ['', '', 'ИТОГО '+str(m['sheet']), m['mark'], '', '', '', '', '', ''] \
               + [round(sums['bysup'][s]) or '' for s in suppliers] \
-              + [round(sums['fuel']) or '', '', '', round(sums['probeg']) or '', '', round(sums['fakt'],1) or '', '',
+              + [round(sums['fuel']) or '', round(sums['glonas']) or '', round(sums['rashod'],1) or '',
+                 '', '', round(sums['probeg']) or '', '', round(sums['fakt'],1) or '', '',
                  round(sums['stoim']) or '', '', round(sums['hours']) or '']
         ws.append(itg)
         for c in ws[ws.max_row]: c.font = BOLD
@@ -255,7 +259,7 @@ def selftest(outfile):
         ws.cell(5,1, datetime.datetime(2026,9,1)); ws.cell(5,2,'Лагунов'); ws.cell(5,4,'УГМК-ЦХХ')
         ws.cell(5,5,'погрузка'); ws.cell(5,6,11); ws.cell(5,7,5700); ws.cell(5,8,62700)
         ws.cell(5,10,6994); ws.cell(5,11,6998); ws.cell(5,12,7095); ws.cell(5,13,7105); ws.cell(5,14,100)
-        ws.cell(5,15,180); ws.cell(5,16,'Кушва'); ws.cell(5,17,200); ws.cell(5,19,3000); ws.cell(5,20,'Кушва')
+        ws.cell(5,15,180); ws.cell(5,16,'Кушва'); ws.cell(5,17,200); ws.cell(5,18,160); ws.cell(5,19,3000); ws.cell(5,20,'Кушва')
         ws.cell(5,21,7907.36); ws.cell(5,22,'ГСМ, масла, жидкости')
         ws.cell(6,1, datetime.datetime(2026,9,2)); ws.cell(6,4,'УГМК-ЦХХ'); ws.cell(6,7,5700); ws.cell(6,8,0)
         ws.cell(6,21,24426.25); ws.cell(6,22,'Запчасти, материалы')
@@ -271,6 +275,8 @@ def selftest(outfile):
         assert 'Кушва' in rhdr, rhdr
         r1 = dict(zip(rhdr, [c.value for c in rb[3]]))
         assert r1['Кушва']==180, r1['Кушва']
+        assert r1['Заправка по ГЛОНАСС']==160, r1['Заправка по ГЛОНАСС']
+        assert r1['Расхождение (чек-ГЛОНАСС)']==20, r1['Расхождение (чек-ГЛОНАСС)']
         assert r1['Стоимость работы']==62700, r1['Стоимость работы']
         # расход-реализация: реализация на объекты РЭМ (не сторона), затраты свободные
         rr = openpyxl.load_workbook(res['out2'])['Расход-реализация']
