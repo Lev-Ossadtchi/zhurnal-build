@@ -84,6 +84,7 @@ def read_edinaya(folder):
                     price=num(gi(row,'цена 1 часа работы','цена','цена 1 часа')),
                     stoim=num(gi(row,'стоимость работы','стоимость')),
                     fuel_src=str(gi(row,'источник заправки','источник') or '').strip(),
+                    fuel_type=str(gi(row,'вид топлива','наименование топлива','марка топлива','топливо') or '').strip(),
                     cost_items=items))
     return rows, skipped
 
@@ -129,7 +130,7 @@ def build_report(rows, norms, outpath, suppliers=None):
         cat = norms.get(r['mark'],{}).get('cat','ТТ')
         by_cat.setdefault(cat, []).append(r)
     cols = (['№ путевого','Дата','Ф.И.О.','Марка','Гос.№','спидометр нач','спидометр кон','мотосчётчик нач','мотосчётчик кон','бак нач']
-            + suppliers + ['Заправка общая','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
+            + suppliers + ['Заправка общая','Вид топлива','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
     def emit_machine(ws, group):
         sums = dict(hours=0.0, stoim=0.0, fuel=0.0, glonas=0.0, rashod=0.0, probeg=0.0, fakt=0.0, bysup={s:0.0 for s in suppliers})
         g = sorted(group, key=lambda x: x['date'])
@@ -147,7 +148,7 @@ def build_report(rows, norms, outpath, suppliers=None):
             stoim = r.get('stoim') or ((r.get('hours',0) or 0)*(r.get('price',0) or 0))
             line = [r['putlist'], r['date'], r['fio'], r['mark'], r['sheet'], r['sp0'] or '', r['sp1'] or '',
                     r['mh0'] or '', r['mh1'] or '', r['bak0'] or ''] + [zap[s] for s in suppliers] + \
-                   [r['fuel'] or '', r['glonas'] or '', rashod if (r['fuel'] or r['glonas']) else '',
+                   [r['fuel'] or '', r.get('fuel_type','') or '', r['glonas'] or '', rashod if (r['fuel'] or r['glonas']) else '',
                     r['bak1'] or '', mch or '', probeg or '', norma, fakt, econ,
                     round(stoim) if stoim else '', r['work'], r['hours'] or '']
             ws.append(line); ws.cell(ws.max_row, 2).number_format = 'DD.MM.YYYY'
@@ -159,7 +160,7 @@ def build_report(rows, norms, outpath, suppliers=None):
         m = g[0]
         itg = ['', '', 'ИТОГО '+str(m['sheet']), m['mark'], '', '', '', '', '', ''] \
               + [round(sums['bysup'][s]) or '' for s in suppliers] \
-              + [round(sums['fuel']) or '', round(sums['glonas']) or '', round(sums['rashod'],1) or '',
+              + [round(sums['fuel']) or '', '', round(sums['glonas']) or '', round(sums['rashod'],1) or '',
                  '', '', round(sums['probeg']) or '', '', round(sums['fakt'],1) or '', '',
                  round(sums['stoim']) or '', '', round(sums['hours']) or '']
         ws.append(itg)
@@ -173,6 +174,32 @@ def build_report(rows, norms, outpath, suppliers=None):
         for r in by_cat.get(cat, []): groups.setdefault(r['sheet'], []).append(r)
         for sheet in sorted(groups, key=str): emit_machine(ws, groups[sheet])
         ws.freeze_panes = 'A3'
+    # Сверка топлива: заправка по поставщикам в разрезе видов топлива (сверять с выпиской кабинета)
+    ftypes = sorted({(r.get('fuel_type') or '').strip() or 'не указан' for r in rows if (r.get('fuel') or 0)})
+    if ftypes:
+        sv = wb.create_sheet('Сверка топлива')
+        sv.append(['Заправка по поставщикам и видам топлива, л (для сверки с личным кабинетом)'])
+        sv.append(['Поставщик'] + ftypes + ['Итого, л'])
+        for c in sv[2]: c.font, c.fill, c.border = BOLD, HEAD, THIN
+        mat = {}
+        for r in rows:
+            f = r.get('fuel') or 0
+            if not f: continue
+            sup = (r['post'] or r.get('fuel_src') or 'не указан').strip() or 'не указан'
+            ft = (r.get('fuel_type') or '').strip() or 'не указан'
+            mat.setdefault(sup, {}); mat[sup][ft] = mat[sup].get(ft, 0.0) + f
+        coltot = {ft: 0.0 for ft in ftypes}
+        for sup in sorted(mat):
+            rowv = [sup]; rt = 0.0
+            for ft in ftypes:
+                v = mat[sup].get(ft, 0.0); rowv.append(round(v) if v else ''); rt += v; coltot[ft] += v
+            rowv.append(round(rt))
+            sv.append(rowv)
+            for c in sv[sv.max_row]: c.border = THIN
+        sv.append(['ИТОГО'] + [round(coltot[ft]) or '' for ft in ftypes] + [round(sum(coltot.values()))])
+        for c in sv[sv.max_row]: c.font, c.border = BOLD, THIN
+        sv.column_dimensions['A'].width = 22
+        sv.freeze_panes = 'B3'
     wb.save(outpath)
     return {c: len(by_cat.get(c,[])) for c in ['АТ','ТТ','наши']}
 
@@ -251,7 +278,7 @@ def selftest(outfile):
         ws.append([])  # на всякий случай не используется, шапку ставим явно ниже
         hdr = ['Дата','Ф.И.О. водителя','м/ч','Объект','Вид работ','Отработано часов','Цена 1 часа работы',
                'Стоимость работы','Маршрут','нач.','конеч.','нач.','конеч.','Бак нач','Заправка','Поставщик',
-               'Бак кон','Глонас','Заправка руб','Источник заправки','Затраты на ремонт','']
+               'Бак кон','Глонас','Заправка руб','Источник заправки','Затраты на ремонт','','Вид топлива']
         # шапку кладём в строку 4
         for i, v in enumerate(hdr, 1): ws.cell(4, i, v)
         # строка данных: объект УГМК-ЦХХ (на объекты РЭМ по умолчанию), стоимость 62700,
@@ -260,9 +287,9 @@ def selftest(outfile):
         ws.cell(5,5,'погрузка'); ws.cell(5,6,11); ws.cell(5,7,5700); ws.cell(5,8,62700)
         ws.cell(5,10,6994); ws.cell(5,11,6998); ws.cell(5,12,7095); ws.cell(5,13,7105); ws.cell(5,14,100)
         ws.cell(5,15,180); ws.cell(5,16,'Кушва'); ws.cell(5,17,200); ws.cell(5,18,160); ws.cell(5,19,3000); ws.cell(5,20,'Кушва')
-        ws.cell(5,21,7907.36); ws.cell(5,22,'ГСМ, масла, жидкости')
+        ws.cell(5,21,7907.36); ws.cell(5,22,'ГСМ, масла, жидкости'); ws.cell(5,23,'ДТ')
         ws.cell(6,1, datetime.datetime(2026,9,2)); ws.cell(6,4,'УГМК-ЦХХ'); ws.cell(6,7,5700); ws.cell(6,8,0)
-        ws.cell(6,21,24426.25); ws.cell(6,22,'Запчасти, материалы')
+        ws.cell(6,21,24426.25); ws.cell(6,22,'Запчасти, материалы'); ws.cell(6,23,'ДТ')
         norms_wb = openpyxl.Workbook(); nw = norms_wb.active; nw.title='Нормы'
         nw.append(['Машина','Категория','Норма','Ед']); nw.append(['Кран ZRT600','наши',0,'л/мч'])
         os.makedirs(d, exist_ok=True)
@@ -270,14 +297,19 @@ def selftest(outfile):
         res = run(d, log=lambda *a: None)
         assert len(res['rows'])==2, len(res['rows'])
         # рапорт: колонка поставщика Кушва, заправка 180, итого по машине
-        rb = openpyxl.load_workbook(res['out'])['наши']
+        wbr = openpyxl.load_workbook(res['out']); rb = wbr['наши']
         rhdr = [c.value for c in rb[2]]
         assert 'Кушва' in rhdr, rhdr
         r1 = dict(zip(rhdr, [c.value for c in rb[3]]))
         assert r1['Кушва']==180, r1['Кушва']
+        assert r1['Вид топлива']=='ДТ', r1['Вид топлива']
         assert r1['Заправка по ГЛОНАСС']==160, r1['Заправка по ГЛОНАСС']
         assert r1['Расхождение (чек-ГЛОНАСС)']==20, r1['Расхождение (чек-ГЛОНАСС)']
         assert r1['Стоимость работы']==62700, r1['Стоимость работы']
+        assert 'Сверка топлива' in wbr.sheetnames, wbr.sheetnames
+        sv = wbr['Сверка топлива']; svrows=[[c.value for c in r] for r in sv.iter_rows()]
+        svtxt=' | '.join(str(c) for row in svrows for c in row if c)
+        assert 'ДТ' in svtxt and 'Кушва' in svtxt, 'сверка топлива неполна: '+svtxt[:120]
         # расход-реализация: реализация на объекты РЭМ (не сторона), затраты свободные
         rr = openpyxl.load_workbook(res['out2'])['Расход-реализация']
         rrh = [c.value for c in rr[2]]; rrow = dict(zip(rrh, [c.value for c in rr[3]]))
