@@ -125,9 +125,15 @@ def build_report(rows, norms, outpath, suppliers=None):
     После строк каждой машины — строка ИТОГО по машине."""
     wb = openpyxl.Workbook(); wb.remove(wb.active)
     if suppliers is None: suppliers = suppliers_from(rows)
+    KNOWN = ['АТ','ТТ','наши']; OTHER = 'Без категории'
     by_cat = {'АТ':[], 'ТТ':[], 'наши':[]}
+    uncat = set()  # марки, у которых в Настройках нет категории или она нестандартная
     for r in rows:
-        cat = norms.get(r['mark'],{}).get('cat','ТТ')
+        cat = (norms.get(r['mark'],{}).get('cat') or '').strip()
+        if cat not in KNOWN:
+            if cat: uncat.add((r['mark'], cat))     # есть, но нестандартная
+            else: uncat.add((r['mark'], ''))        # нет в справочнике вовсе
+            cat = OTHER
         by_cat.setdefault(cat, []).append(r)
     cols = (['№ путевого','Дата','Ф.И.О.','Марка','Гос.№','спидометр нач','спидометр кон','мотосчётчик нач','мотосчётчик кон','бак нач']
             + suppliers + ['Заправка общая','Вид топлива','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
@@ -165,7 +171,8 @@ def build_report(rows, norms, outpath, suppliers=None):
                  round(sums['stoim']) or '', '', round(sums['hours']) or '']
         ws.append(itg)
         for c in ws[ws.max_row]: c.font = BOLD
-    for cat in ['АТ','ТТ','наши']:
+    cats_to_emit = KNOWN + ([OTHER] if by_cat.get(OTHER) else [])
+    for cat in cats_to_emit:
         ws = wb.create_sheet(cat)
         ws.append(['Рапорт (собран из единой записи)'])
         ws.append(cols)
@@ -173,6 +180,12 @@ def build_report(rows, norms, outpath, suppliers=None):
         groups = {}
         for r in by_cat.get(cat, []): groups.setdefault(r['sheet'], []).append(r)
         for sheet in sorted(groups, key=str): emit_machine(ws, groups[sheet])
+        if cat == OTHER:
+            ws.append([])
+            ws.append(['Эти машины не найдены в справочнике Настройки_журнал.xlsx или у них пустая/непонятная категория.'])
+            ws.append(['Допишите их в Настройки (столбец Категория: АТ, ТТ или наши), тогда они попадут в свой лист.'])
+            for marki in sorted({m for m,_ in uncat}):
+                ws.append(['  - '+str(marki)])
         ws.freeze_panes = 'A3'
     # Сверка топлива: заправка по поставщикам в разрезе видов топлива (сверять с выпиской кабинета)
     ftypes = sorted({(r.get('fuel_type') or '').strip() or 'не указан' for r in rows if (r.get('fuel') or 0)})
@@ -203,38 +216,65 @@ def build_report(rows, norms, outpath, suppliers=None):
     wb.save(outpath)
     return {c: len(by_cat.get(c,[])) for c in ['АТ','ТТ','наши']}
 
+FUEL_ORDER = ['ДТ', 'АИ-92', 'АИ-95', 'АИ-98', 'ГАЗ']
+def fuel_sort_key(ft):
+    # ДТ и известные бензины в заданном порядке, остальные — по алфавиту после них
+    return (FUEL_ORDER.index(ft), '') if ft in FUEL_ORDER else (len(FUEL_ORDER), ft)
+def norm_fuel(ft):
+    """Привести вид топлива к единому виду: пусто -> ДТ; 92/95 -> АИ-92/АИ-95."""
+    s = str(ft or '').strip()
+    if not s: return 'ДТ'
+    low = s.lower().replace('аи', '').replace('-', '').replace(' ', '')
+    if low in ('92',): return 'АИ-92'
+    if low in ('95',): return 'АИ-95'
+    if low in ('98',): return 'АИ-98'
+    if low in ('дт','дизель','дизельное','солярка','солярa'): return 'ДТ'
+    return s
+
 def build_rashod(rows, storona_objs, outpath):
-    """Расход+реализация по машине: заправка ДТ (руб), затраты (свободные статьи как внесены),
-    реализация (по умолчанию на объекты РЭМ; на сторону — если объект в списке сторонних)."""
+    """Расход+реализация по машине: заправка по видам топлива в руб (ДТ, АИ-92, АИ-95 — для
+    лёгкой техники), затраты (свободные статьи как внесены), реализация (по умолчанию на
+    объекты РЭМ; на сторону — если объект в списке сторонних)."""
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Расход-реализация'
     ws.append(['Расход и реализация по машинам (собрано из единой записи)'])
-    header = ['Машина','Марка','Заправка ДТ, руб','Итого затрат, руб',
-              'Реализация на объекты РЭМ, руб','Реализация на сторону, руб','Итого реализация, руб']
-    ws.append(header)
-    for c in ws[2]: c.font, c.fill, c.border = BOLD, HEAD, THIN
     agg = {}; order = []
     for r in rows:
         k = (r['sheet'], r['mark'])
-        if k not in agg: agg[k] = dict(fuel=0.0, items={}, rem=0.0, storona=0.0); order.append(k)
+        if k not in agg: agg[k] = dict(fuel=0.0, fuel_by_type={}, items={}, rem=0.0, storona=0.0); order.append(k)
         a = agg[k]
-        a['fuel'] += r.get('fuel_rub', 0.0) or 0.0
+        fr = r.get('fuel_rub', 0.0) or 0.0
+        a['fuel'] += fr
+        if fr:
+            ft = norm_fuel(r.get('fuel_type'))
+            a['fuel_by_type'][ft] = a['fuel_by_type'].get(ft, 0.0) + fr
         for nm, s in (r.get('cost_items') or []):
             a['items'][nm] = a['items'].get(nm, 0.0) + s
         real = r.get('stoim') or ((r.get('hours',0.0) or 0.0)*(r.get('price',0.0) or 0.0))
         if str(r.get('obj') or '').strip().lower() in storona_objs: a['storona'] += real
         else: a['rem'] += real
     order = sorted(order, key=lambda x: str(x[0]))
-    tot = dict(fuel=0.0, zat=0.0, rem=0.0, storona=0.0)
+    # виды топлива, реально встретившиеся (ДТ показываем всегда, чтобы колонка не пропадала)
+    ftypes = sorted({ft for a in agg.values() for ft in a['fuel_by_type']} | {'ДТ'}, key=fuel_sort_key)
+    fuel_cols = ['Заправка %s, руб' % ft for ft in ftypes]
+    header = ['Машина','Марка'] + fuel_cols + ['Заправка всего, руб','Итого затрат, руб',
+              'Реализация на объекты РЭМ, руб','Реализация на сторону, руб','Итого реализация, руб']
+    ws.append(header)
+    for c in ws[2]: c.font, c.fill, c.border = BOLD, HEAD, THIN
+    ncol = len(header)
+    tot = dict(fuel=0.0, zat=0.0, rem=0.0, storona=0.0, by={ft: 0.0 for ft in ftypes})
     for k in order:
         a = agg[k]; zat = sum(a['items'].values())
-        ws.append([k[0], k[1], round(a['fuel']), round(zat), round(a['rem']), round(a['storona']), round(a['rem']+a['storona'])])
+        byt = [round(a['fuel_by_type'].get(ft, 0.0)) for ft in ftypes]
+        ws.append([k[0], k[1]] + byt + [round(a['fuel']), round(zat), round(a['rem']), round(a['storona']), round(a['rem']+a['storona'])])
         for c in ws[ws.max_row]: c.border = THIN
-        for i in range(3, 8): ws.cell(ws.max_row, i).number_format = '# ##0'
+        for i in range(3, ncol+1): ws.cell(ws.max_row, i).number_format = '# ##0'
         tot['fuel'] += a['fuel']; tot['zat'] += zat; tot['rem'] += a['rem']; tot['storona'] += a['storona']
-    ws.append(['ИТОГО','', round(tot['fuel']), round(tot['zat']), round(tot['rem']), round(tot['storona']), round(tot['rem']+tot['storona'])])
+        for ft in ftypes: tot['by'][ft] += a['fuel_by_type'].get(ft, 0.0)
+    ws.append(['ИТОГО',''] + [round(tot['by'][ft]) for ft in ftypes] + [round(tot['fuel']), round(tot['zat']), round(tot['rem']), round(tot['storona']), round(tot['rem']+tot['storona'])])
     for c in ws[ws.max_row]: c.font, c.border = BOLD, THIN
-    for i in range(3, 8): ws.cell(ws.max_row, i).number_format = '# ##0'
-    for i, w in enumerate([16,26,16,16,24,22,18], 1): ws.column_dimensions[get_column_letter(i)].width = w
+    for i in range(3, ncol+1): ws.cell(ws.max_row, i).number_format = '# ##0'
+    ws.column_dimensions['A'].width = 16; ws.column_dimensions['B'].width = 26
+    for i in range(3, ncol+1): ws.column_dimensions[get_column_letter(i)].width = 18
     # детализация затрат «как внесены»
     ws.append([]); ws.append(['Затраты по статьям (как внесены в единую запись)'])
     ws.cell(ws.max_row, 1).font = BOLD
@@ -290,12 +330,29 @@ def selftest(outfile):
         ws.cell(5,21,7907.36); ws.cell(5,22,'ГСМ, масла, жидкости'); ws.cell(5,23,'ДТ')
         ws.cell(6,1, datetime.datetime(2026,9,2)); ws.cell(6,4,'УГМК-ЦХХ'); ws.cell(6,7,5700); ws.cell(6,8,0)
         ws.cell(6,21,24426.25); ws.cell(6,22,'Запчасти, материалы'); ws.cell(6,23,'ДТ')
+        # лёгкая техника: заправка бензином АИ-92 и АИ-95 (запрос диспетчера 26.10)
+        wsl = wb.create_sheet('Газель'); wsl['A1']='Работа на ООО "РЭМ"'; wsl['A2']='Газель NEXT'
+        for i, v in enumerate(hdr, 1): wsl.cell(4, i, v)
+        wsl.cell(5,1, datetime.datetime(2026,9,1)); wsl.cell(5,2,'Петров'); wsl.cell(5,4,'УГМК-ЦХХ')
+        wsl.cell(5,5,'перевозка'); wsl.cell(5,6,8); wsl.cell(5,7,1200); wsl.cell(5,8,9600)
+        wsl.cell(5,15,40); wsl.cell(5,16,'Лукойл'); wsl.cell(5,19,2600); wsl.cell(5,23,'92')
+        wsl.cell(6,1, datetime.datetime(2026,9,2)); wsl.cell(6,2,'Петров'); wsl.cell(6,4,'УГМК-ЦХХ')
+        wsl.cell(6,5,'перевозка'); wsl.cell(6,6,5); wsl.cell(6,7,1200); wsl.cell(6,8,6000)
+        wsl.cell(6,15,30); wsl.cell(6,16,'Лукойл'); wsl.cell(6,19,2100); wsl.cell(6,23,'АИ-95')
+        # машина БЕЗ записи в справочнике (баг диспетчера 26.10: выпадала из рапорта)
+        wst = wb.create_sheet('Трубач'); wst['A1']='Работа на ООО "РЭМ"'; wst['A2']='ТГ-301'
+        for i, v in enumerate(hdr, 1): wst.cell(4, i, v)
+        wst.cell(5,1, datetime.datetime(2026,9,1)); wst.cell(5,2,'Орлов'); wst.cell(5,4,'УГМК-ЦХХ')
+        wst.cell(5,5,'укладка'); wst.cell(5,6,9); wst.cell(5,7,2000); wst.cell(5,8,18000)
+        wst.cell(5,15,50); wst.cell(5,16,'Лукойл'); wst.cell(5,19,2900); wst.cell(5,23,'92')
         norms_wb = openpyxl.Workbook(); nw = norms_wb.active; nw.title='Нормы'
         nw.append(['Машина','Категория','Норма','Ед']); nw.append(['Кран ZRT600','наши',0,'л/мч'])
+        nw.append(['Газель NEXT','АТ',0,'л/100км'])
+        # ТГ-301 намеренно НЕ добавляем в справочник
         os.makedirs(d, exist_ok=True)
         wb.save(os.path.join(d,'Книга1.xlsx')); norms_wb.save(os.path.join(d,'Настройки_журнал.xlsx'))
         res = run(d, log=lambda *a: None)
-        assert len(res['rows'])==2, len(res['rows'])
+        assert len(res['rows'])==5, len(res['rows'])
         # рапорт: колонка поставщика Кушва, заправка 180, итого по машине
         wbr = openpyxl.load_workbook(res['out']); rb = wbr['наши']
         rhdr = [c.value for c in rb[2]]
@@ -317,6 +374,23 @@ def selftest(outfile):
         assert rrow['Реализация на сторону, руб']==0, rrow['Реализация на сторону, руб']
         assert rrow['Итого затрат, руб']==round(7907.36+24426.25), rrow['Итого затрат, руб']
         assert rrow['Заправка ДТ, руб']==3000, rrow['Заправка ДТ, руб']
+        # лёгкая техника: бензин разнесён по колонкам АИ-92 и АИ-95
+        assert 'Заправка АИ-92, руб' in rrh and 'Заправка АИ-95, руб' in rrh, rrh
+        lrow = None
+        for rr_r in rr.iter_rows(min_row=3, values_only=True):
+            if rr_r and rr_r[0]=='Газель': lrow = dict(zip(rrh, rr_r)); break
+        assert lrow, 'нет строки Газель в расходе'
+        assert lrow['Заправка АИ-92, руб']==2600, lrow['Заправка АИ-92, руб']
+        assert lrow['Заправка АИ-95, руб']==2100, lrow['Заправка АИ-95, руб']
+        assert lrow['Заправка ДТ, руб']==0, lrow['Заправка ДТ, руб']
+        assert lrow['Заправка всего, руб']==4700, lrow['Заправка всего, руб']
+        # баг диспетчера: машина без категории должна быть в рапорте (лист «Без категории»), а не теряться
+        assert 'Без категории' in wbr.sheetnames, wbr.sheetnames
+        bc = wbr['Без категории']; bctxt = ' | '.join(str(c.value) for row in bc.iter_rows() for c in row if c.value)
+        assert 'ТГ-301' in bctxt, 'ТГ-301 потерялся из рапорта: '+bctxt[:160]
+        # и та же машина присутствует в расход-реализации (как было у диспетчера)
+        rr_txt = ' | '.join(str(c) for row in rr.iter_rows(values_only=True) for c in row if c)
+        assert 'Трубач' in rr_txt or 'ТГ-301' in rr_txt, 'ТГ-301 нет в расходе'
         # детализация затрат содержит наименования как внесены
         txt = []
         for row in rr.iter_rows(values_only=True):
