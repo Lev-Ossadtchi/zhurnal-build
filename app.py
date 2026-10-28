@@ -5,7 +5,7 @@
 v4 (фидбек диспетчера 22.10): затраты свободными строками (сумма+наименование, как внесли),
 реализация по умолчанию на объекты РЭМ, итого по каждой машине в рапорте, колонки поставщиков
 строятся из реальных значений. Листы единой записи бывают разной структуры — читаем по названиям."""
-import os, sys, glob, datetime, openpyxl
+import os, sys, glob, datetime, re, openpyxl
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -17,6 +17,10 @@ SUB = ('нач.','начало','нач','конеч.','конеч','конец'
 def num(v):
     try: return float(str(v).replace(',','.').replace(' ',''))
     except: return 0.0
+
+def nk(s):
+    """нормализация ключа машины: убрать хвостовые/двойные пробелы и регистр (напр. 'САГи ' == 'саги')."""
+    return re.sub(r'\s+',' ',str(s or '').strip()).lower()
 
 def read_edinaya(folder):
     """Читает книги единой записи. Лист = машина. Колонки ищем по названию (листы разной структуры).
@@ -89,14 +93,38 @@ def read_edinaya(folder):
     return rows, skipped
 
 def load_norms(folder):
-    """Настройки_журнал.xlsx: лист 'Нормы' (Машина|Категория|Норма|Ед). Если нет — создаёт шаблон."""
+    """Настройки_журнал.xlsx лист 'Нормы'. Столбцы ищем ПО НАЗВАНИЮ шапки, а не по позиции:
+    формат мог стать 5-колоночным (Лист машина | Марка | Категория | Норма | Ед) вместо старого
+    4-колоночного (Машина | Категория | Норма | Ед). Ключуем запись и по имени листа, и по марке —
+    поиск категории потом идёт по любому из них."""
     path = os.path.join(folder, 'Настройки_журнал.xlsx')
     norms = {}
     if os.path.exists(path):
         wb = openpyxl.load_workbook(path, data_only=True)
         if 'Нормы' in wb.sheetnames:
-            for r in wb['Нормы'].iter_rows(min_row=2, values_only=True):
-                if r[0]: norms[str(r[0]).strip()] = dict(cat=(r[1] or 'ТТ'), norm=num(r[2]), unit=(r[3] or 'л/100км'))
+            ws = wb['Нормы']
+            hdr = [nk(c.value) for c in ws[1]]
+            def findcol(*subs, default=None):
+                for i,h in enumerate(hdr):
+                    if any(s in h for s in subs): return i
+                return default
+            ci_list = findcol('лист','машина', default=0)
+            ci_mark = findcol('марка')
+            ci_cat  = findcol('категор', default=1)
+            ci_norm = findcol('норма')
+            ci_unit = findcol('ед','л/100')
+            def cell(row,i):
+                return row[i] if (i is not None and i < len(row)) else None
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row: continue
+                cat = cell(row,ci_cat); norm = num(cell(row,ci_norm)); unit = cell(row,ci_unit) or 'л/100км'
+                rec = dict(cat=(cat or 'ТТ'), norm=norm, unit=unit)
+                keys = []
+                lv = cell(row,ci_list); mv = cell(row,ci_mark)
+                if lv: keys.append(nk(lv))
+                if mv: keys.append(nk(mv))
+                for k in keys:
+                    if k: norms[k] = rec
     return norms, path
 
 def load_storona_objects(folder):
@@ -114,11 +142,13 @@ def load_storona_objects(folder):
 
 def suppliers_from(rows):
     """Список поставщиков из реальных данных (Поставщик или Источник заправки), по алфавиту."""
-    s = set()
+    seen = {}  # нормализованное имя -> первое встреченное написание (без дублей по регистру/пробелам)
     for r in rows:
         for v in (r.get('post'), r.get('fuel_src')):
-            if v and str(v).strip(): s.add(str(v).strip())
-    return sorted(s)
+            if v and str(v).strip():
+                disp = str(v).strip(); key = nk(disp)
+                if key not in seen: seen[key] = disp
+    return sorted(seen.values())
 
 def build_report(rows, norms, outpath, suppliers=None):
     """Рапорт по топливу/пробегу, листы АТ/ТТ/наши. Колонки поставщиков — из реальных данных.
@@ -129,7 +159,7 @@ def build_report(rows, norms, outpath, suppliers=None):
     by_cat = {'АТ':[], 'ТТ':[], 'наши':[]}
     uncat = set()  # марки, у которых в Настройках нет категории или она нестандартная
     for r in rows:
-        cat = (norms.get(r['mark'],{}).get('cat') or '').strip()
+        cat = ((norms.get(nk(r['sheet'])) or norms.get(nk(r['mark'])) or {}).get('cat') or '').strip()
         if cat not in KNOWN:
             if cat: uncat.add((r['mark'], cat))     # есть, но нестандартная
             else: uncat.add((r['mark'], ''))        # нет в справочнике вовсе
@@ -137,11 +167,12 @@ def build_report(rows, norms, outpath, suppliers=None):
         by_cat.setdefault(cat, []).append(r)
     cols = (['№ путевого','Дата','Ф.И.О.','Марка','Гос.№','спидометр нач','спидометр кон','мотосчётчик нач','мотосчётчик кон','бак нач']
             + suppliers + ['Заправка общая','Вид топлива','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
+    supmap = {nk(s): s for s in suppliers}  # нормализованное имя -> столбец (пробелы/регистр не мешают)
     def emit_machine(ws, group):
         sums = dict(hours=0.0, stoim=0.0, fuel=0.0, glonas=0.0, rashod=0.0, probeg=0.0, fakt=0.0, bysup={s:0.0 for s in suppliers})
         g = sorted(group, key=lambda x: x['date'])
         for r in g:
-            nm = norms.get(r['mark'],{})
+            nm = norms.get(nk(r['sheet'])) or norms.get(nk(r['mark'])) or {}
             probeg = max(0, r['sp1']-r['sp0']); mch = max(0, r['mh1']-r['mh0'])
             fakt = round(r['bak0'] + r['fuel'] - r['bak1'], 1)
             if nm.get('unit','').startswith('л/100'): norma = round(probeg*nm.get('norm',0)/100,1)
@@ -150,7 +181,8 @@ def build_report(rows, norms, outpath, suppliers=None):
             rashod = round((r['fuel'] or 0) - (r['glonas'] or 0), 1)   # заправка по чеку минус по ГЛОНАСС
             zap = {s:'' for s in suppliers}
             sup = r['post'] or r.get('fuel_src','')
-            if sup in zap and r['fuel']: zap[sup] = r['fuel']
+            col = supmap.get(nk(sup))  # сопоставление без учёта лишних пробелов и регистра
+            if col and r['fuel']: zap[col] = r['fuel']
             stoim = r.get('stoim') or ((r.get('hours',0) or 0)*(r.get('price',0) or 0))
             line = [r['putlist'], r['date'], r['fio'], r['mark'], r['sheet'], r['sp0'] or '', r['sp1'] or '',
                     r['mh0'] or '', r['mh1'] or '', r['bak0'] or ''] + [zap[s] for s in suppliers] + \
