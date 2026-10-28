@@ -56,6 +56,12 @@ def read_edinaya(folder):
                     if g:
                         sub = 'нач' if v.startswith('нач') else 'кон'
                         col.setdefault(g + ' ' + sub, i)
+            # литры заправки: заголовок бывает «Заправка (л)», «Заправка, л», «Заправка литры» —
+            # привяжем к единому ключу 'заправка' любой столбец, начинающийся с 'заправка' и не про рубли/источник
+            if 'заправка' not in col:
+                for name, i in col.items():
+                    if name.startswith('заправка') and not any(x in name for x in ('руб','сумма','источник','дт руб')):
+                        col['заправка'] = i; break
             def gi(row, *names):
                 for n in names:
                     i = col.get(n)
