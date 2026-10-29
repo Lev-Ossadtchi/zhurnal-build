@@ -27,7 +27,7 @@ def read_edinaya(folder):
     Поддержка двухстрочной шапки: «Спидометр»/«Моточасы» в строке выше, «нач.»/«конеч.» под ними.
     Затраты: пара «сумма (колонка Затраты на ремонт) + наименование (колонка справа)», строк может
     быть несколько, названия произвольные."""
-    rows = []; skipped = []
+    rows = []; skipped = []; salaries = {}
     for f in glob.glob(os.path.join(folder, '*.xlsx')):
         b = os.path.basename(f)
         if b.startswith('~$') or 'Настройки' in b or 'Рапорт' in b or 'Расход' in b: continue
@@ -69,6 +69,19 @@ def read_edinaya(folder):
                 return None
             zi = col.get('затраты на ремонт')
             if zi is None: zi = col.get('ремонт')
+            # зарплата водителя: ячейка в шапке (строки выше заголовка «Дата»), подпись содержит
+            # «зарплата», значение — первое число справа от подписи; одной суммой по машине за месяц
+            zp = 0.0
+            for rr in ws.iter_rows(min_row=1, max_row=max(hdr-1, 1)):
+                cells = list(rr)
+                for ci, c in enumerate(cells):
+                    if c.value and 'зарплат' in str(c.value).lower():
+                        for c2 in cells[ci+1:]:
+                            v = num(c2.value)
+                            if v: zp = v; break
+                        break
+                if zp: break
+            if zp: salaries[(ws.title, mark)] = salaries.get((ws.title, mark), 0.0) + zp
             for row in ws.iter_rows(min_row=hdr+1, values_only=True):
                 date = gi(row,'дата')
                 if not isinstance(date,(datetime.datetime,datetime.date)):
@@ -96,7 +109,7 @@ def read_edinaya(folder):
                     fuel_src=str(gi(row,'источник заправки','источник') or '').strip(),
                     fuel_type=str(gi(row,'вид топлива','наименование топлива','марка топлива','топливо') or '').strip(),
                     cost_items=items))
-    return rows, skipped
+    return rows, skipped, salaries
 
 def load_norms(folder):
     """Настройки_журнал.xlsx лист 'Нормы'. Столбцы ищем ПО НАЗВАНИЮ шапки, а не по позиции:
@@ -269,10 +282,11 @@ def norm_fuel(ft):
     if low in ('дт','дизель','дизельное','солярка','солярa'): return 'ДТ'
     return s
 
-def build_rashod(rows, storona_objs, outpath):
+def build_rashod(rows, storona_objs, outpath, salaries=None):
     """Расход+реализация по машине: заправка по видам топлива в руб (ДТ, АИ-92, АИ-95 — для
-    лёгкой техники), затраты (свободные статьи как внесены), реализация (по умолчанию на
-    объекты РЭМ; на сторону — если объект в списке сторонних)."""
+    лёгкой техники), затраты (свободные статьи как внесены, плюс «Зарплата водителя» из ячейки
+    в шапке листа — одной суммой по машине), реализация (по умолчанию на объекты РЭМ; на
+    сторону — если объект в списке сторонних)."""
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Расход-реализация'
     ws.append(['Расход и реализация по машинам (собрано из единой записи)'])
     agg = {}; order = []
@@ -290,6 +304,13 @@ def build_rashod(rows, storona_objs, outpath):
         real = r.get('stoim') or ((r.get('hours',0.0) or 0.0)*(r.get('price',0.0) or 0.0))
         if str(r.get('obj') or '').strip().lower() in storona_objs: a['storona'] += real
         else: a['rem'] += real
+    # зарплата водителя как статья затрат по машине (входит в «Итого затрат» и в детализацию)
+    if salaries:
+        for (sheet, mark), zp in salaries.items():
+            if not zp: continue
+            k = (sheet, mark)
+            if k not in agg: agg[k] = dict(fuel=0.0, fuel_by_type={}, items={}, rem=0.0, storona=0.0); order.append(k)
+            agg[k]['items']['Зарплата водителя'] = agg[k]['items'].get('Зарплата водителя', 0.0) + zp
     order = sorted(order, key=lambda x: str(x[0]))
     # виды топлива, реально встретившиеся (ДТ показываем всегда, чтобы колонка не пропадала)
     ftypes = sorted({ft for a in agg.values() for ft in a['fuel_by_type']} | {'ДТ'}, key=fuel_sort_key)
@@ -334,13 +355,13 @@ def build_rashod(rows, storona_objs, outpath):
     return {'машин': len(agg), 'затраты': round(tot['zat']), 'реализация': round(tot['rem']+tot['storona'])}
 
 def run(folder, log=print):
-    rows, skipped = read_edinaya(folder)
+    rows, skipped, salaries = read_edinaya(folder)
     norms, npath = load_norms(folder)
     storona = load_storona_objects(folder)
     out = os.path.join(folder, 'Рапорт (собран).xlsx')
     stats = build_report(rows, norms, out)
     out2 = os.path.join(folder, 'Расход-реализация (собран).xlsx')
-    rstats = build_rashod(rows, storona, out2)
+    rstats = build_rashod(rows, storona, out2, salaries)
     log(f'строк: {len(rows)}, пропущено: {len(skipped)}, рапорт: {stats}, расход: {rstats}')
     return dict(rows=rows, stats=stats, rstats=rstats, out=out, out2=out2, skipped=skipped)
 
@@ -353,6 +374,8 @@ def selftest(outfile):
         ws['A1']='Работа на ООО "РЭМ"'; ws['A2']='Кран ZRT600'
         # двухстрочная шапка: Спидометр/Моточасы в строке 3, нач./конеч. в строке 4
         ws['J3']='Спидометр'; ws['L3']='Моточасы'
+        # зарплата водителя одной суммой по машине (ячейка в шапке) — должна уйти в расход статьёй
+        ws['A3']='Зарплата водителя за месяц, руб (одной суммой):'; ws['B3']=50000
         ws.append([])  # на всякий случай не используется, шапку ставим явно ниже
         hdr = ['Дата','Ф.И.О. водителя','м/ч','Объект','Вид работ','Отработано часов','Цена 1 часа работы',
                'Стоимость работы','Маршрут','нач.','конеч.','нач.','конеч.','Бак нач','Заправка','Поставщик',
@@ -410,7 +433,7 @@ def selftest(outfile):
         rrh = [c.value for c in rr[2]]; rrow = dict(zip(rrh, [c.value for c in rr[3]]))
         assert rrow['Реализация на объекты РЭМ, руб']==62700, rrow['Реализация на объекты РЭМ, руб']
         assert rrow['Реализация на сторону, руб']==0, rrow['Реализация на сторону, руб']
-        assert rrow['Итого затрат, руб']==round(7907.36+24426.25), rrow['Итого затрат, руб']
+        assert rrow['Итого затрат, руб']==round(7907.36+24426.25+50000), rrow['Итого затрат, руб']
         assert rrow['Заправка ДТ, руб']==3000, rrow['Заправка ДТ, руб']
         # лёгкая техника: бензин разнесён по колонкам АИ-92 и АИ-95
         assert 'Заправка АИ-92, руб' in rrh and 'Заправка АИ-95, руб' in rrh, rrh
@@ -437,6 +460,8 @@ def selftest(outfile):
         joined = ' | '.join(txt)
         assert 'ГСМ, масла, жидкости' in joined, 'нет статьи ГСМ в детализации'
         assert 'Запчасти, материалы' in joined, 'нет статьи Запчасти'
+        # зарплата водителя попала в расход отдельной статьёй
+        assert 'Зарплата водителя' in joined, 'нет статьи Зарплата водителя в расходе'
         gui = 'ok'
         try:
             rt = build_gui(); rt.update(); rt.destroy()
