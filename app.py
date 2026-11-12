@@ -82,28 +82,37 @@ def read_edinaya(folder):
                         break
                 if zp: break
             if zp: salaries[(ws.title, mark)] = salaries.get((ws.title, mark), 0.0) + zp
+            # строки-продолжения ОБЪЕДИНЁННОЙ ячейки даты (несколько работ/объектов за один день):
+            # openpyxl отдаёт в них дату=None. Это реальные работы того же дня — учитываем их по
+            # наличию значения, даже если объект/ФИО не продублированы (иначе часы 2-й+ работы дня
+            # теряются в рапорте — баг диспетчера 12.11). Колонка даты может быть не первой.
+            date_col1 = col.get('дата', -1) + 1
+            date_cont = set()
+            for m in ws.merged_cells.ranges:
+                if m.min_col <= date_col1 <= m.max_col and m.max_row > m.min_row:
+                    date_cont.update(range(m.min_row + 1, m.max_row + 1))
             last_date = None  # протяжка даты вниз: в ручном журнале дата стоит на первой строке дня,
             # следующие строки того же дня идут без даты (там и бывает ручная сумма реализации на сторону)
-            for row in ws.iter_rows(min_row=hdr+1, values_only=True):
+            for ridx, row in enumerate(ws.iter_rows(min_row=hdr+1, values_only=True), start=hdr+1):
                 date = gi(row,'дата')
                 if isinstance(date,(datetime.datetime,datetime.date)):
                     last_date = date
                 else:
-                    # строка без даты: принимаем ТОЛЬКО реальную строку работы (есть исполнитель/объект/
-                    # заказчик) со значением — тогда наследует дату строки выше. Итоговые строки листа
-                    # («ИТОГО»: ни ФИО, ни объекта, ни заказчика — только суммы часов/стоимости) НЕ берём,
-                    # иначе реализация задвоится.
+                    # строка без даты. Принимаем, если есть значение И (она под объединённой датой ИЛИ
+                    # есть исполнитель/объект/заказчик). Итоговые строки листа («ИТОГО»: без ФИО/объекта/
+                    # заказчика и НЕ под объединённой датой) не берём, иначе реализация задвоится.
                     fio = str(gi(row,'ф.и.о. водителя','фио','ф.и.о.') or '').strip()
                     objv = str(gi(row,'объект') or '').strip()
                     zakv = str(gi(row,'заказчик') or '').strip()
                     workv = str(gi(row,'вид работ','вид работ / груз') or '').strip().lower()
                     has_val = (num(gi(row,'отработано часов')) or num(gi(row,'стоимость работы','стоимость'))
                                or num(gi(row,'заправка')) or (zi is not None and zi < len(row) and num(row[zi])))
-                    is_real = (fio or objv or zakv) and has_val and workv not in ('итого', 'всего')
+                    under_merged_date = ridx in date_cont
+                    is_real = has_val and workv not in ('итого', 'всего') and (under_merged_date or fio or objv or zakv)
                     if last_date and is_real:
-                        date = last_date                         # наследует дату строки выше
+                        date = last_date                         # наследует дату строки/объединённого блока выше
                     else:
-                        if has_val and not (fio or objv or zakv): skipped.append((ws.title, 'строка-итог'))
+                        if has_val and not (under_merged_date or fio or objv or zakv): skipped.append((ws.title, 'строка-итог'))
                         continue
                 items = []
                 if zi is not None and zi < len(row):
@@ -460,6 +469,14 @@ def selftest(outfile):
         wsx.cell(6,2,'Сидоров'); wsx.cell(6,5,'кран'); wsx.cell(6,8,5000); wsx.cell(6,24,'Святогор')
         # строка-ИТОГ листа: без даты, без ФИО/объекта/заказчика, только суммы — НЕ должна учитываться
         wsx.cell(7,5,'ИТОГО'); wsx.cell(7,9,20); wsx.cell(7,8,99999)
+        # ОБЪЕДИНЁННАЯ ячейка даты: один день, два объекта/работы (баг диспетчера 12.11).
+        # 2-я строка дня без даты/объекта/ФИО (только часы+стоимость) не должна теряться в рапорте.
+        wsm = wb.create_sheet('Мультидень'); wsm['A1']='Работа на ООО "РЭМ"'; wsm['A2']='МТЗ 82'
+        for i, v in enumerate(hdr, 1): wsm.cell(4, i, v)
+        wsm.cell(5,1, datetime.datetime(2026,9,1)); wsm.cell(5,2,'Иванов'); wsm.cell(5,4,'ОбъектА')
+        wsm.cell(5,6,5); wsm.cell(5,7,1000); wsm.cell(5,8,5000)
+        wsm.cell(6,6,7); wsm.cell(6,8,7000)   # 2-я работа дня: только часы и стоимость
+        wsm.merge_cells('A5:A6')              # дата объединена на обе строки
         norms_wb = openpyxl.Workbook(); nw = norms_wb.active; nw.title='Нормы'
         nw.append(['Машина','Категория','Норма','Ед']); nw.append(['Кран ZRT600','наши',0,'л/мч'])
         nw.append(['Газель NEXT','АТ',0,'л/100км'])
@@ -467,7 +484,11 @@ def selftest(outfile):
         os.makedirs(d, exist_ok=True)
         wb.save(os.path.join(d,'Книга1.xlsx')); norms_wb.save(os.path.join(d,'Настройки_журнал.xlsx'))
         res = run(d, log=lambda *a: None)
-        assert len(res['rows'])==7, len(res['rows'])
+        assert len(res['rows'])==9, len(res['rows'])
+        # объединённая дата: обе строки дня учтены, часы не потеряны (5+7=12, стоимость 5000+7000)
+        md = [r for r in res['rows'] if r['sheet']=='Мультидень']
+        assert len(md)==2, 'merged-дата: потеряна строка дня, строк=%d' % len(md)
+        assert sum(r['hours'] for r in md)==12, 'merged-дата: часы потеряны, сумма=%s' % sum(r['hours'] for r in md)
         # рапорт: колонка поставщика Кушва, заправка 180, итого по машине
         wbr = openpyxl.load_workbook(res['out']); rb = wbr['наши']
         rhdr = [c.value for c in rb[2]]
