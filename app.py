@@ -82,12 +82,29 @@ def read_edinaya(folder):
                         break
                 if zp: break
             if zp: salaries[(ws.title, mark)] = salaries.get((ws.title, mark), 0.0) + zp
+            last_date = None  # протяжка даты вниз: в ручном журнале дата стоит на первой строке дня,
+            # следующие строки того же дня идут без даты (там и бывает ручная сумма реализации на сторону)
             for row in ws.iter_rows(min_row=hdr+1, values_only=True):
                 date = gi(row,'дата')
-                if not isinstance(date,(datetime.datetime,datetime.date)):
-                    if any(gi(row,n) for n in ('заправка','отработано часов')) or (zi is not None and zi < len(row) and num(row[zi])):
-                        skipped.append((ws.title, 'нет даты'))
-                    continue
+                if isinstance(date,(datetime.datetime,datetime.date)):
+                    last_date = date
+                else:
+                    # строка без даты: принимаем ТОЛЬКО реальную строку работы (есть исполнитель/объект/
+                    # заказчик) со значением — тогда наследует дату строки выше. Итоговые строки листа
+                    # («ИТОГО»: ни ФИО, ни объекта, ни заказчика — только суммы часов/стоимости) НЕ берём,
+                    # иначе реализация задвоится.
+                    fio = str(gi(row,'ф.и.о. водителя','фио','ф.и.о.') or '').strip()
+                    objv = str(gi(row,'объект') or '').strip()
+                    zakv = str(gi(row,'заказчик') or '').strip()
+                    workv = str(gi(row,'вид работ','вид работ / груз') or '').strip().lower()
+                    has_val = (num(gi(row,'отработано часов')) or num(gi(row,'стоимость работы','стоимость'))
+                               or num(gi(row,'заправка')) or (zi is not None and zi < len(row) and num(row[zi])))
+                    is_real = (fio or objv or zakv) and has_val and workv not in ('итого', 'всего')
+                    if last_date and is_real:
+                        date = last_date                         # наследует дату строки выше
+                    else:
+                        if has_val and not (fio or objv or zakv): skipped.append((ws.title, 'строка-итог'))
+                        continue
                 items = []
                 if zi is not None and zi < len(row):
                     s = num(row[zi])
@@ -96,7 +113,7 @@ def read_edinaya(folder):
                         items.append((str(nm).strip() if nm else 'Затраты на ремонт', s))
                 rows.append(dict(sheet=ws.title, mark=mark, book=b, date=date,
                     putlist=gi(row,'№ путевого','номер путевого','путевой'), fio=gi(row,'ф.и.о. водителя','фио','ф.и.о.'),
-                    obj=gi(row,'объект'), work=gi(row,'вид работ'), hours=num(gi(row,'отработано часов')),
+                    obj=gi(row,'объект'), zakaz=str(gi(row,'заказчик') or '').strip(), work=gi(row,'вид работ'), hours=num(gi(row,'отработано часов')),
                     sp0=num(gi(row,'спидометр на начало','спидометр нач')), sp1=num(gi(row,'спидометр на конец','спидометр кон')),
                     mh0=num(gi(row,'мотосчётчик на начало','мотосчётчик нач','м/ч нач','моточасы нач')),
                     mh1=num(gi(row,'мотосчётчик на конец','мотосчётчик кон','м/ч кон','моточасы кон')),
@@ -285,14 +302,17 @@ def norm_fuel(ft):
 def build_rashod(rows, storona_objs, outpath, salaries=None):
     """Расход+реализация по машине: заправка по видам топлива в руб (ДТ, АИ-92, АИ-95 — для
     лёгкой техники), затраты (свободные статьи как внесены, плюс «Зарплата водителя» из ячейки
-    в шапке листа — одной суммой по машине), реализация (по умолчанию на объекты РЭМ; на
-    сторону — если объект в списке сторонних)."""
+    в шапке листа — одной суммой по машине), реализация. На сторону идёт реализация строк, где
+    заполнена колонка «Заказчик» (= сторонняя организация: у неё свои ставки, сумму диспетчер
+    ставит вручную в «Стоимость работы»); остальное — на объекты РЭМ. Старый механизм по списку
+    сторонних ОБЪЕКТОВ (storona_objs) сохранён как запасной."""
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Расход-реализация'
     ws.append(['Расход и реализация по машинам (собрано из единой записи)'])
     agg = {}; order = []
+    def _new(): return dict(fuel=0.0, fuel_by_type={}, items={}, rem=0.0, storona=0.0, storona_by={})
     for r in rows:
         k = (r['sheet'], r['mark'])
-        if k not in agg: agg[k] = dict(fuel=0.0, fuel_by_type={}, items={}, rem=0.0, storona=0.0); order.append(k)
+        if k not in agg: agg[k] = _new(); order.append(k)
         a = agg[k]
         fr = r.get('fuel_rub', 0.0) or 0.0
         a['fuel'] += fr
@@ -302,14 +322,20 @@ def build_rashod(rows, storona_objs, outpath, salaries=None):
         for nm, s in (r.get('cost_items') or []):
             a['items'][nm] = a['items'].get(nm, 0.0) + s
         real = r.get('stoim') or ((r.get('hours',0.0) or 0.0)*(r.get('price',0.0) or 0.0))
-        if str(r.get('obj') or '').strip().lower() in storona_objs: a['storona'] += real
+        zak = str(r.get('zakaz') or '').strip()
+        if zak:                                                  # заполнен заказчик -> сторонняя организация
+            a['storona'] += real; a['storona_by'][zak] = a['storona_by'].get(zak, 0.0) + real
+        elif str(r.get('obj') or '').strip().lower() in storona_objs:  # запасной механизм по объекту
+            a['storona'] += real
+            o = str(r.get('obj') or '').strip()
+            a['storona_by'][o] = a['storona_by'].get(o, 0.0) + real
         else: a['rem'] += real
     # зарплата водителя как статья затрат по машине (входит в «Итого затрат» и в детализацию)
     if salaries:
         for (sheet, mark), zp in salaries.items():
             if not zp: continue
             k = (sheet, mark)
-            if k not in agg: agg[k] = dict(fuel=0.0, fuel_by_type={}, items={}, rem=0.0, storona=0.0); order.append(k)
+            if k not in agg: agg[k] = _new(); order.append(k)
             agg[k]['items']['Зарплата водителя'] = agg[k]['items'].get('Зарплата водителя', 0.0) + zp
     order = sorted(order, key=lambda x: str(x[0]))
     # виды топлива, реально встретившиеся (ДТ показываем всегда, чтобы колонка не пропадала)
@@ -351,6 +377,23 @@ def build_rashod(rows, storona_objs, outpath, salaries=None):
         for c in ws[ws.max_row]: c.font = BOLD
         ws.cell(ws.max_row, 4).number_format = '# ##0'
     if not any_z: ws.append(['', '', 'затрат не внесено', ''])
+    # расшифровка реализации на сторону: какая машина по какой сторонней организации сколько
+    if any(a['storona_by'] for a in agg.values()):
+        ws.append([]); ws.append(['Реализация на сторону — по заказчикам (сторонним организациям)'])
+        ws.cell(ws.max_row, 1).font = BOLD
+        ws.append(['Машина','Марка','Заказчик (сторонняя организация)','Сумма, руб'])
+        for c in ws[ws.max_row]: c.font, c.fill, c.border = BOLD, HEAD, THIN
+        stot = 0.0
+        for k in order:
+            a = agg[k]
+            if not a['storona_by']: continue
+            for nm, s in sorted(a['storona_by'].items()):
+                ws.append([k[0], k[1], nm, round(s)]); ws.cell(ws.max_row, 4).number_format = '# ##0'
+                for c in ws[ws.max_row]: c.border = THIN
+                stot += s
+        ws.append(['', '', 'ИТОГО на сторону', round(stot)])
+        for c in ws[ws.max_row]: c.font = BOLD
+        ws.cell(ws.max_row, 4).number_format = '# ##0'
     wb.save(outpath)
     return {'машин': len(agg), 'затраты': round(tot['zat']), 'реализация': round(tot['rem']+tot['storona'])}
 
@@ -379,7 +422,7 @@ def selftest(outfile):
         ws.append([])  # на всякий случай не используется, шапку ставим явно ниже
         hdr = ['Дата','Ф.И.О. водителя','м/ч','Объект','Вид работ','Отработано часов','Цена 1 часа работы',
                'Стоимость работы','Маршрут','нач.','конеч.','нач.','конеч.','Бак нач','Заправка','Поставщик',
-               'Бак кон','Глонас','Заправка руб','Источник заправки','Затраты на ремонт','','Вид топлива']
+               'Бак кон','Глонас','Заправка руб','Источник заправки','Затраты на ремонт','','Вид топлива','Заказчик']
         # шапку кладём в строку 4
         for i, v in enumerate(hdr, 1): ws.cell(4, i, v)
         # строка данных: объект УГМК-ЦХХ (на объекты РЭМ по умолчанию), стоимость 62700,
@@ -406,6 +449,17 @@ def selftest(outfile):
         wst.cell(5,1, datetime.datetime(2026,9,1)); wst.cell(5,2,'Орлов'); wst.cell(5,4,'УГМК-ЦХХ')
         wst.cell(5,5,'укладка'); wst.cell(5,6,9); wst.cell(5,7,2000); wst.cell(5,8,18000)
         wst.cell(5,15,50); wst.cell(5,16,'Лукойл'); wst.cell(5,19,2900); wst.cell(5,23,'92')
+        # реализация НА СТОРОНУ: заполнен Заказчик (сторонняя организация), сумма 45000 внесена вручную,
+        # объект пуст — должна уйти в колонку «на сторону», а не на объекты РЭМ (доработка Ларисы 12.11)
+        wsx = wb.create_sheet('Сторонняя'); wsx['A1']='Работа на ООО "РЭМ"'; wsx['A2']='Кран SANY'
+        for i, v in enumerate(hdr, 1): wsx.cell(4, i, v)
+        wsx.cell(5,1, datetime.datetime(2026,9,1)); wsx.cell(5,2,'Сидоров'); wsx.cell(5,5,'кран')
+        wsx.cell(5,8,45000); wsx.cell(5,24,'Святогор')
+        # вторая строка того же дня БЕЗ даты (как в журнале Ларисы) — дата протягивается сверху,
+        # сумма 5000 не должна потеряться: итог на сторону по Святогору = 50000
+        wsx.cell(6,2,'Сидоров'); wsx.cell(6,5,'кран'); wsx.cell(6,8,5000); wsx.cell(6,24,'Святогор')
+        # строка-ИТОГ листа: без даты, без ФИО/объекта/заказчика, только суммы — НЕ должна учитываться
+        wsx.cell(7,5,'ИТОГО'); wsx.cell(7,9,20); wsx.cell(7,8,99999)
         norms_wb = openpyxl.Workbook(); nw = norms_wb.active; nw.title='Нормы'
         nw.append(['Машина','Категория','Норма','Ед']); nw.append(['Кран ZRT600','наши',0,'л/мч'])
         nw.append(['Газель NEXT','АТ',0,'л/100км'])
@@ -413,7 +467,7 @@ def selftest(outfile):
         os.makedirs(d, exist_ok=True)
         wb.save(os.path.join(d,'Книга1.xlsx')); norms_wb.save(os.path.join(d,'Настройки_журнал.xlsx'))
         res = run(d, log=lambda *a: None)
-        assert len(res['rows'])==5, len(res['rows'])
+        assert len(res['rows'])==7, len(res['rows'])
         # рапорт: колонка поставщика Кушва, заправка 180, итого по машине
         wbr = openpyxl.load_workbook(res['out']); rb = wbr['наши']
         rhdr = [c.value for c in rb[2]]
@@ -462,6 +516,16 @@ def selftest(outfile):
         assert 'Запчасти, материалы' in joined, 'нет статьи Запчасти'
         # зарплата водителя попала в расход отдельной статьёй
         assert 'Зарплата водителя' in joined, 'нет статьи Зарплата водителя в расходе'
+        # ДОРАБОТКА 12.11: реализация по заполненному заказчику уходит на сторону, а не на объекты РЭМ
+        srow = None
+        for rr_r in rr.iter_rows(min_row=3, values_only=True):
+            if rr_r and rr_r[0]=='Сторонняя': srow = dict(zip(rrh, rr_r)); break
+        assert srow, 'нет строки Сторонняя в расходе'
+        assert srow['Реализация на сторону, руб']==50000, srow['Реализация на сторону, руб']  # 45000 + протянутая 5000
+        assert srow['Реализация на объекты РЭМ, руб']==0, srow['Реализация на объекты РЭМ, руб']
+        # расшифровка на сторону по заказчикам: Святогор 45000
+        assert 'Реализация на сторону — по заказчикам' in joined, 'нет блока расшифровки стороны'
+        assert 'Святогор' in joined, 'нет Святогора в расшифровке стороны'
         gui = 'ok'
         try:
             rt = build_gui(); rt.update(); rt.destroy()
