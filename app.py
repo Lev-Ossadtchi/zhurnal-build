@@ -129,7 +129,7 @@ def read_edinaya(folder):
                         items.append((str(nm).strip() if nm else 'Затраты на ремонт', s))
                 rows.append(dict(sheet=ws.title, mark=mark, book=b, date=date,
                     putlist=gi(row,'№ путевого','номер путевого','путевой'), fio=gi(row,'ф.и.о. водителя','фио','ф.и.о.'),
-                    obj=gi(row,'объект'), zakaz=str(gi(row,'заказчик') or '').strip(), work=gi(row,'вид работ'), hours=num(gi(row,'отработано часов')),
+                    obj=gi(row,'объект'), zakaz=str(gi(row,'заказчик') or '').strip(), work=gi(row,'вид работ','вид работ / груз'), hours=num(gi(row,'отработано часов')),
                     sp0=num(gi(row,'спидометр на начало','спидометр нач')), sp1=num(gi(row,'спидометр на конец','спидометр кон')),
                     mh0=num(gi(row,'мотосчётчик на начало','мотосчётчик нач','м/ч нач','моточасы нач')),
                     mh1=num(gi(row,'мотосчётчик на конец','мотосчётчик кон','м/ч кон','моточасы кон')),
@@ -518,6 +518,7 @@ def selftest(outfile):
         assert r1['Заправка по ГЛОНАСС']==160, r1['Заправка по ГЛОНАСС']
         assert r1['Расхождение (чек-ГЛОНАСС)']==20, r1['Расхождение (чек-ГЛОНАСС)']
         assert r1['Стоимость работы']==62700, r1['Стоимость работы']
+        assert r1['Вид работ']=='погрузка', 'вид работ не попал в рапорт: %r' % r1['Вид работ']
         assert 'Сверка топлива' in wbr.sheetnames, wbr.sheetnames
         sv = wbr['Сверка топлива']; svrows=[[c.value for c in r] for r in sv.iter_rows()]
         svtxt=' | '.join(str(c) for row in svrows for c in row if c)
