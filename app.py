@@ -226,11 +226,11 @@ def build_report(rows, norms, outpath, suppliers=None):
         for r in g:
             nm = norms.get(nk(r['sheet'])) or norms.get(nk(r['mark'])) or {}
             probeg = max(0, r['sp1']-r['sp0']); mch = max(0, r['mh1']-r['mh0'])
-            fakt = round(r['bak0'] + r['fuel'] - r['bak1'], 1)
+            fakt = round(r['bak0'] + r['fuel'] - r['bak1'], 2)
             if nm.get('unit','').startswith('л/100'): norma = round(probeg*nm.get('norm',0)/100,1)
             else: norma = round(mch*nm.get('norm',0),1)
             econ = round(norma - fakt, 1)
-            rashod = round((r['fuel'] or 0) - (r['glonas'] or 0), 1)   # заправка по чеку минус по ГЛОНАСС
+            rashod = round((r['fuel'] or 0) - (r['glonas'] or 0), 2)   # заправка по чеку минус по ГЛОНАСС
             zap = {s:'' for s in suppliers}
             sup = r['post'] or r.get('fuel_src','')
             col = supmap.get(nk(sup))  # сопоставление без учёта лишних пробелов и регистра
@@ -249,9 +249,9 @@ def build_report(rows, norms, outpath, suppliers=None):
                 if isinstance(zap[s], (int, float)): sums['bysup'][s] += zap[s]
         m = g[0]
         itg = ['', '', 'ИТОГО '+str(m['sheet']), m['mark'], str(m['sheet']), '', '', '', '', ''] \
-              + [round(sums['bysup'][s]) or '' for s in suppliers] \
-              + [round(sums['fuel']) or '', '', round(sums['glonas']) or '', round(sums['rashod'],1) or '',
-                 '', '', round(sums['probeg']) or '', '', round(sums['fakt'],1) or '', '',
+              + [round(sums['bysup'][s], 2) or '' for s in suppliers] \
+              + [round(sums['fuel'], 2) or '', '', round(sums['glonas'], 2) or '', round(sums['rashod'], 2) or '',
+                 '', '', round(sums['probeg']) or '', '', round(sums['fakt'], 2) or '', '',
                  round(sums['stoim']) or '', '', round(sums['hours']) or '']
         ws.append(itg)
         for c in ws[ws.max_row]: c.font = BOLD
@@ -289,11 +289,11 @@ def build_report(rows, norms, outpath, suppliers=None):
         for sup in sorted(mat):
             rowv = [sup]; rt = 0.0
             for ft in ftypes:
-                v = mat[sup].get(ft, 0.0); rowv.append(round(v) if v else ''); rt += v; coltot[ft] += v
-            rowv.append(round(rt))
+                v = mat[sup].get(ft, 0.0); rowv.append(round(v, 2) if v else ''); rt += v; coltot[ft] += v
+            rowv.append(round(rt, 2))
             sv.append(rowv)
             for c in sv[sv.max_row]: c.border = THIN
-        sv.append(['ИТОГО'] + [round(coltot[ft]) or '' for ft in ftypes] + [round(sum(coltot.values()))])
+        sv.append(['ИТОГО'] + [round(coltot[ft], 2) or '' for ft in ftypes] + [round(sum(coltot.values()), 2)])
         for c in sv[sv.max_row]: c.font, c.border = BOLD, THIN
         sv.column_dimensions['A'].width = 22
         sv.freeze_panes = 'B3'
