@@ -248,7 +248,7 @@ def build_report(rows, norms, outpath, suppliers=None):
             for s in suppliers:
                 if isinstance(zap[s], (int, float)): sums['bysup'][s] += zap[s]
         m = g[0]
-        itg = ['', '', 'ИТОГО '+str(m['sheet']), m['mark'], '', '', '', '', '', ''] \
+        itg = ['', '', 'ИТОГО '+str(m['sheet']), m['mark'], str(m['sheet']), '', '', '', '', ''] \
               + [round(sums['bysup'][s]) or '' for s in suppliers] \
               + [round(sums['fuel']) or '', '', round(sums['glonas']) or '', round(sums['rashod'],1) or '',
                  '', '', round(sums['probeg']) or '', '', round(sums['fakt'],1) or '', '',
