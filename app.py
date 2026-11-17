@@ -30,7 +30,8 @@ def read_edinaya(folder):
     rows = []; skipped = []; salaries = {}
     for f in glob.glob(os.path.join(folder, '*.xlsx')):
         b = os.path.basename(f)
-        if b.startswith('~$') or 'Настройки' in b or 'Рапорт' in b or 'Расход' in b: continue
+        if b.startswith('~$') or 'Настройки' in b or 'Рапорт' in b or 'Расход' in b \
+           or 'Отчёт' in b or 'Отчет' in b: continue   # не трогаем посторонние файлы (напр. «Отчёт по объектам»), чтобы не плодить «Без категории»
         wb = openpyxl.load_workbook(f, data_only=True)
         for ws in wb.worksheets:
             # марка машины: первая непустая ячейка строк 1-3, не начинающаяся со слова «работа»
