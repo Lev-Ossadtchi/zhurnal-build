@@ -226,7 +226,8 @@ def build_report(rows, norms, outpath, suppliers=None):
         for r in g:
             nm = norms.get(nk(r['sheet'])) or norms.get(nk(r['mark'])) or {}
             probeg = max(0, r['sp1']-r['sp0']); mch = max(0, r['mh1']-r['mh0'])
-            fakt = round(r['bak0'] + r['fuel'] - r['bak1'], 2)
+            b0 = int(round(r['bak0'])); b1 = int(round(r['bak1']))   # остатки бака — целые литры (без дробей)
+            fakt = round(b0 + r['fuel'] - b1, 2)
             if nm.get('unit','').startswith('л/100'): norma = round(probeg*nm.get('norm',0)/100,1)
             else: norma = round(mch*nm.get('norm',0),1)
             econ = round(norma - fakt, 1)
@@ -237,9 +238,9 @@ def build_report(rows, norms, outpath, suppliers=None):
             if col and r['fuel']: zap[col] = r['fuel']
             stoim = r.get('stoim') or ((r.get('hours',0) or 0)*(r.get('price',0) or 0))
             line = [r['putlist'], r['date'], r['fio'], r['mark'], r['sheet'], r['sp0'] or '', r['sp1'] or '',
-                    r['mh0'] or '', r['mh1'] or '', r['bak0'] or ''] + [zap[s] for s in suppliers] + \
+                    r['mh0'] or '', r['mh1'] or '', b0 or ''] + [zap[s] for s in suppliers] + \
                    [r['fuel'] or '', r.get('fuel_type','') or '', r['glonas'] or '', rashod if (r['fuel'] or r['glonas']) else '',
-                    r['bak1'] or '', mch or '', probeg or '', norma, fakt, econ,
+                    b1 or '', mch or '', probeg or '', norma, fakt, econ,
                     round(stoim) if stoim else '', r['work'], r['hours'] or '']
             ws.append(line); ws.cell(ws.max_row, 2).number_format = 'DD.MM.YYYY'
             sums['hours'] += r['hours'] or 0; sums['stoim'] += stoim or 0; sums['fuel'] += r['fuel'] or 0
