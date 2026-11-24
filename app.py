@@ -93,6 +93,7 @@ def read_edinaya(folder):
                 if m.min_col <= date_col1 <= m.max_col and m.max_row > m.min_row:
                     date_cont.update(range(m.min_row + 1, m.max_row + 1))
             last_date = None     # протяжка даты вниз: дата стоит на первой строке дня, следующие строки дня без неё
+            last_fio = None      # последняя фамилия в блоке дня (для строк-продолжений объединённой даты)
             prev_content = hdr    # номер последней содержательной строки — чтобы отличить работу внутри блока от строки-ИТОГ
             for ridx, row in enumerate(ws.iter_rows(min_row=hdr+1, values_only=True), start=hdr+1):
                 date = gi(row,'дата')
@@ -114,13 +115,18 @@ def read_edinaya(folder):
                     adjacent = (ridx == prev_content + 1)
                     is_real = has_val and workv not in ('итого', 'всего') and (under_merged_date or fio or objv or zakv or adjacent)
                     if is_real:
-                        date = last_date                         # дата строки/объединённого блока выше;
-                        # может остаться пустой, если дат по машине нет вовсе — строку всё равно учитываем
+                        date = last_date
+                        # 24.11 (Лариса, КамАЗ А036ХМ 13.11): дата и Ф.И.О. объединены на две строки
+                        # (работа + ремонт), фамилия стоит только на первой — без наследования вторая
+                        # строка уходила в рапорт без Ф.И.О., и часы терялись из зарплаты сотрудника.
+                        if not fio and last_fio:
+                            fio = last_fio
                     else:
                         if has_val and not (under_merged_date or fio or objv or zakv or adjacent):
                             skipped.append((ws.title, 'строка-итог'))
                         if dated or fio or objv or zakv or has_val: prev_content = ridx
                         continue
+                if fio: last_fio = fio      # фамилия на строке — обновляем «текущего водителя» блока
                 if dated or fio or objv or zakv or has_val: prev_content = ridx
                 items = []
                 if zi is not None and zi < len(row):
@@ -129,7 +135,7 @@ def read_edinaya(folder):
                         nm = row[zi+1] if zi+1 < len(row) and row[zi+1] not in (None, '') else None
                         items.append((str(nm).strip() if nm else 'Затраты на ремонт', s))
                 rows.append(dict(sheet=ws.title, mark=mark, book=b, date=date,
-                    putlist=gi(row,'№ путевого','номер путевого','путевой'), fio=gi(row,'ф.и.о. водителя','фио','ф.и.о.'),
+                    putlist=gi(row,'№ путевого','номер путевого','путевой'), fio=str(fio or '').strip() or None,
                     obj=gi(row,'объект'), zakaz=str(gi(row,'заказчик') or '').strip(), work=gi(row,'вид работ','вид работ / груз'), hours=num(gi(row,'отработано часов')),
                     sp0=num(gi(row,'спидометр на начало','спидометр нач')), sp1=num(gi(row,'спидометр на конец','спидометр кон')),
                     mh0=num(gi(row,'мотосчётчик на начало','мотосчётчик нач','м/ч нач','моточасы нач')),
@@ -203,7 +209,7 @@ def suppliers_from(rows):
                 if key not in seen: seen[key] = disp
     return sorted(seen.values())
 
-def build_report(rows, norms, outpath, suppliers=None):
+def build_report(rows, norms, outpath, suppliers=None, personal=None):
     """Рапорт по топливу/пробегу, листы АТ/ТТ/наши. Колонки поставщиков — из реальных данных.
     После строк каждой машины — строка ИТОГО по машине."""
     wb = openpyxl.Workbook(); wb.remove(wb.active)
@@ -273,6 +279,22 @@ def build_report(rows, norms, outpath, suppliers=None):
             for marki in sorted({m for m,_ in uncat}):
                 ws.append(['  - '+str(marki)])
         ws.freeze_panes = 'A3'
+        # Заправки личных авто: пофамильно одним списком на листе «наши» (Лариса, 23.11:
+        # не как на технику — не отдельный лист на каждую машину, а один список).
+        if cat == 'наши' and personal:
+            ws.append([]); ws.append(['Заправки личных авто (по картам компании) — пофамильно'])
+            ws.cell(ws.max_row, 1).font = BOLD
+            ws.append(['Фамилия', 'Кол-во, л', 'Сумма, ₽'])
+            for c in ws[ws.max_row]: c.font, c.fill, c.border = BOLD, HEAD, THIN
+            pl = pl_lit = 0.0
+            for p in personal:
+                ws.append([p['fio'], p['litry'] or '', p['summa'] or ''])
+                ws.cell(ws.max_row, 2).number_format = '# ##0,00'
+                ws.cell(ws.max_row, 3).number_format = '# ##0'
+                for c in ws[ws.max_row]: c.border = THIN
+                pl += p['litry'] or 0.0; pl_lit += p['summa'] or 0.0
+            ws.append(['ИТОГО', round(pl, 2), round(pl_lit, 2)])
+            for c in ws[ws.max_row]: c.font = BOLD
     # Сверка топлива: заправка по поставщикам в разрезе видов топлива (сверять с выпиской кабинета)
     ftypes = sorted({(r.get('fuel_type') or '').strip() or 'не указан' for r in rows if (r.get('fuel') or 0)})
     if ftypes:
@@ -317,7 +339,7 @@ def norm_fuel(ft):
     if low in ('дт','дизель','дизельное','солярка','солярa'): return 'ДТ'
     return s
 
-def build_rashod(rows, storona_objs, outpath, salaries=None):
+def build_rashod(rows, storona_objs, outpath, salaries=None, personal=None):
     """Расход+реализация по машине: заправка по видам топлива в руб (ДТ, АИ-92, АИ-95 — для
     лёгкой техники), затраты (свободные статьи как внесены, плюс «Зарплата водителя» из ячейки
     в шапке листа — одной суммой по машине), реализация. На сторону идёт реализация строк, где
@@ -412,18 +434,62 @@ def build_rashod(rows, storona_objs, outpath, salaries=None):
         ws.append(['', '', 'ИТОГО на сторону', round(stot)])
         for c in ws[ws.max_row]: c.font = BOLD
         ws.cell(ws.max_row, 4).number_format = '# ##0'
+    # Заправки личных авто: отдельным блоком в конце — кол-во и сумма падают в реализацию
+    # отдельно от машин (Лариса 23.11), пофамильно одним списком.
+    if personal:
+        ws.append([]); ws.append(['Заправки личных авто (карты компании) — реализация отдельно от техники'])
+        ws.cell(ws.max_row, 1).font = BOLD
+        ws.append(['Фамилия', 'Кол-во, л', 'Сумма, ₽'])
+        for c in ws[ws.max_row]: c.font, c.fill, c.border = BOLD, HEAD, THIN
+        pl_sum = 0.0
+        for p in personal:
+            ws.append([p['fio'], round(p['litry'], 2) or '', round(p['summa'], 2) or ''])
+            ws.cell(ws.max_row, 3).number_format = '# ##0'
+            for c in ws[ws.max_row]: c.border = THIN
+            pl_sum += p['summa'] or 0.0
+        ws.append(['', 'ИТОГО', round(pl_sum, 2)])
+        for c in ws[ws.max_row]: c.font = BOLD
+        ws.cell(ws.max_row, 3).number_format = '# ##0'
     wb.save(outpath)
     return {'машин': len(agg), 'затраты': round(tot['zat']), 'реализация': round(tot['rem']+tot['storona'])}
+
+def read_personal_fuel(folder):
+    """Заправки личных авто по картам компании (файл «Заправки личных авто.xlsx»).
+    Лариса заносит раз в месяц одним списком: Фамилия | Кол-во, л | Сумма, ₽.
+    Файл необязателен: нет файла — нет секции."""
+    import glob as _g
+    hits = _g.glob(os.path.join(folder, '*аправк*лич*')) + _g.glob(os.path.join(folder, '*лич*аправк*'))
+    hits = [h for h in hits if not os.path.basename(h).startswith('~$') and h.endswith('.xlsx')]
+    if not hits:
+        return []
+    wb = openpyxl.load_workbook(hits[0], data_only=True)
+    ws = wb.active
+    out = []
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        vals = [v for v in row if v not in (None, '')]
+        if not vals:
+            continue
+        low = ' '.join(str(v).lower() for v in vals)
+        if 'фамил' in low or 'кол-во' in low or 'сумма' in low:
+            continue    # шапка
+        fio = str(vals[0]).strip() if len(vals) > 0 else ''
+        litry = num(vals[1]) if len(vals) > 1 else 0.0
+        summa = num(vals[2]) if len(vals) > 2 else 0.0
+        if fio and (litry or summa):
+            out.append(dict(fio=fio, litry=litry, summa=summa))
+    return out
+
 
 def run(folder, log=print):
     rows, skipped, salaries = read_edinaya(folder)
     norms, npath = load_norms(folder)
     storona = load_storona_objects(folder)
+    personal = read_personal_fuel(folder)
     out = os.path.join(folder, 'Рапорт (собран).xlsx')
-    stats = build_report(rows, norms, out)
+    stats = build_report(rows, norms, out, personal=personal)
     out2 = os.path.join(folder, 'Расход-реализация (собран).xlsx')
-    rstats = build_rashod(rows, storona, out2, salaries)
-    log(f'строк: {len(rows)}, пропущено: {len(skipped)}, рапорт: {stats}, расход: {rstats}')
+    rstats = build_rashod(rows, storona, out2, salaries, personal=personal)
+    log(f'строк: {len(rows)}, пропущено: {len(skipped)}, рапорт: {stats}, расход: {rstats}, личные заправки: {len(personal)}')
     return dict(rows=rows, stats=stats, rstats=rstats, out=out, out2=out2, skipped=skipped)
 
 def selftest(outfile):
@@ -486,6 +552,12 @@ def selftest(outfile):
         wsm.cell(5,6,5); wsm.cell(5,7,1000); wsm.cell(5,8,5000)
         wsm.cell(6,6,7); wsm.cell(6,8,7000)   # 2-я работа дня: только часы и стоимость
         wsm.merge_cells('A5:A6')              # дата объединена на обе строки
+        # 24.11 (Лариса, КамАЗ А036ХМ 13.11): работа + ремонт в один день, Ф.И.О.
+        # объединено и стоит только на первой строке — вторая строка должна
+        # унаследовать фамилию, иначе в рапорте строка без Ф.И.О. и часы
+        # теряются из зарплаты сотрудника.
+        wsm.cell(6,2,'Иванов')                # фамилия на обе строки (объединена)
+        wsm.merge_cells('B5:B6')
         # машина БЕЗ дат вовсе (часть машин так ведут): строки с ФИО/объектом/часами, дата пустая.
         # Строки должны учитываться (баг диспетчера 12.11: такие машины выпадали целиком).
         wsn = wb.create_sheet('Бездат'); wsn['A1']='Работа на ООО "РЭМ"'; wsn['A2']='Газель Соболь'
@@ -500,6 +572,13 @@ def selftest(outfile):
         # ТГ-301 намеренно НЕ добавляем в справочник
         os.makedirs(d, exist_ok=True)
         wb.save(os.path.join(d,'Книга1.xlsx')); norms_wb.save(os.path.join(d,'Настройки_журнал.xlsx'))
+        # заправки личных авто по картам (Лариса, 23.11): один список пофамильно,
+        # раз в месяц; должен попасть в лист «наши» рапорта и отдельным блоком в расход
+        pl = openpyxl.Workbook(); plws = pl.active; plws.title='Личные'
+        plws.append(['Фамилия','Кол-во, л','Сумма, ₽'])
+        plws.append(['Смирнов', 40.5, 2600])
+        plws.append(['Кузнецов', 32.0, 2050])
+        pl.save(os.path.join(d,'Заправки личных авто.xlsx'))
         res = run(d, log=lambda *a: None)
         assert len(res['rows'])==12, len(res['rows'])
         # объединённая дата: обе строки дня учтены, часы не потеряны (5+7=12, стоимость 5000+7000)
@@ -516,6 +595,15 @@ def selftest(outfile):
         assert 'Кушва' in rhdr, rhdr
         r1 = dict(zip(rhdr, [c.value for c in rb[3]]))
         assert r1['Кушва']==180, r1['Кушва']
+        # merged ФИО: обе строки дня получили фамилию Иванов (ремонт без пустой фамилии)
+        both = [r['fio'] for r in md]
+        assert all(f=='Иванов' for f in both), 'merged-ФИО: фамилия не наследовалась: %s' % both
+        # заправки личных авто: секция на листе «наши» пофамильно + ИТОГО
+        pl_rows = [(rb.cell(rr,1).value, rb.cell(rr,2).value, rb.cell(rr,3).value)
+                   for rr in range(1, rb.max_row+1)
+                   if rb.cell(rr,1).value in ('Смирнов','Кузнецов')]
+        assert len(pl_rows)==2, 'личные заправки: не все строки на «наших», %s' % pl_rows
+        assert rb.cell(rb.max_row,1).value=='ИТОГО', rb.cell(rb.max_row,1).value
         assert r1['Вид топлива']=='ДТ', r1['Вид топлива']
         assert r1['Заправка по ГЛОНАСС']==160, r1['Заправка по ГЛОНАСС']
         assert r1['Расхождение (чек-ГЛОНАСС)']==20, r1['Расхождение (чек-ГЛОНАСС)']
