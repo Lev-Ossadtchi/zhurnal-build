@@ -148,6 +148,7 @@ def read_edinaya(folder):
                     stoim=num(gi(row,'стоимость работы','стоимость')),
                     fuel_src=str(gi(row,'источник заправки','источник') or '').strip(),
                     fuel_type=str(gi(row,'вид топлива','наименование топлива','марка топлива','топливо') or '').strip(),
+                    route=str(gi(row,'маршрут') or '').strip(),
                     cost_items=items))
     return rows, skipped, salaries
 
@@ -225,7 +226,7 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
             cat = OTHER
         by_cat.setdefault(cat, []).append(r)
     cols = (['№ путевого','Дата','Ф.И.О.','Марка','Гос.№','спидометр нач','спидометр кон','мотосчётчик нач','мотосчётчик кон','бак нач']
-            + suppliers + ['Заправка общая','Вид топлива','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы'])
+            + suppliers + ['Заправка общая','Вид топлива','Заправка по ГЛОНАСС','Расхождение (чек-ГЛОНАСС)','бак кон','м/ч','Пробег','расход норма','расход факт','экономия','Стоимость работы','Вид работ','Часы','Маршрут'])
     supmap = {nk(s): s for s in suppliers}  # нормализованное имя -> столбец (пробелы/регистр не мешают)
     def emit_machine(ws, group):
         sums = dict(hours=0.0, stoim=0.0, fuel=0.0, glonas=0.0, rashod=0.0, probeg=0.0, fakt=0.0, bysup={s:0.0 for s in suppliers})
@@ -248,7 +249,7 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
                     r['mh0'] or '', r['mh1'] or '', b0 or ''] + [zap[s] for s in suppliers] + \
                    [r['fuel'] or '', r.get('fuel_type','') or '', r['glonas'] or '', rashod if (r['fuel'] or r['glonas']) else '',
                     b1 or '', mch or '', probeg or '', norma, fakt, econ,
-                    round(stoim) if stoim else '', r['work'], r['hours'] or '']
+                    round(stoim) if stoim else '', r['work'], r['hours'] or '', r.get('route') or '']
             ws.append(line); ws.cell(ws.max_row, 2).number_format = 'DD.MM.YYYY'
             sums['hours'] += r['hours'] or 0; sums['stoim'] += stoim or 0; sums['fuel'] += r['fuel'] or 0
             sums['glonas'] += r['glonas'] or 0; sums['rashod'] += rashod
@@ -260,7 +261,7 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
               + [round(sums['bysup'][s], 2) or '' for s in suppliers] \
               + [round(sums['fuel'], 2) or '', '', round(sums['glonas'], 2) or '', round(sums['rashod'], 2) or '',
                  '', '', round(sums['probeg']) or '', '', round(sums['fakt'], 2) or '', '',
-                 round(sums['stoim']) or '', '', round(sums['hours']) or '']
+                 round(sums['stoim']) or '', '', round(sums['hours']) or '', '']
         ws.append(itg)
         for c in ws[ws.max_row]: c.font = BOLD
     cats_to_emit = KNOWN + ([OTHER] if by_cat.get(OTHER) else [])
@@ -296,7 +297,8 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
             ws.append(['ИТОГО', round(pl, 2), '', '', round(pl_sum, 2)])
             for c in ws[ws.max_row]: c.font = BOLD
     # Сверка топлива: заправка по поставщикам в разрезе видов топлива (сверять с выпиской кабинета)
-    ftypes = sorted({(r.get('fuel_type') or '').strip() or 'не указан' for r in rows if (r.get('fuel') or 0)})
+    ftypes = sorted({norm_fuel((r.get('fuel_type') or '').strip()) for r in rows if (r.get('fuel') or 0)}
+                    | {p.get('ft') for p in (personal or []) if p.get('ft')}, key=fuel_sort_key)
     if ftypes:
         sv = wb.create_sheet('Сверка топлива')
         sv.append(['Заправка по поставщикам и видам топлива, л (для сверки с личным кабинетом)'])
@@ -307,7 +309,7 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
             f = r.get('fuel') or 0
             if not f: continue
             sup = (r['post'] or r.get('fuel_src') or 'не указан').strip() or 'не указан'
-            ft = (r.get('fuel_type') or '').strip() or 'не указан'
+            ft = norm_fuel((r.get('fuel_type') or '').strip())   # 24.11: «95»→«АИ-95», иначе литры личных авто уходили в невидимую колонку
             mat.setdefault(sup, {}); mat[sup][ft] = mat[sup].get(ft, 0.0) + f
         # 24.11 (Лариса): в сверку входят и заправки личных авто по картам компании —
         # по тем же поставщикам и видам топлива, чтобы сходилась выписка кабинета.
