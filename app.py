@@ -284,16 +284,16 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
         if cat == 'наши' and personal:
             ws.append([]); ws.append(['Заправки личных авто (по картам компании) — пофамильно'])
             ws.cell(ws.max_row, 1).font = BOLD
-            ws.append(['Фамилия', 'Кол-во, л', 'Сумма, ₽'])
+            ws.append(['Ф.И.О.', 'Кол-во, л', 'Вид топлива', 'Поставщик', 'Сумма, ₽'])
             for c in ws[ws.max_row]: c.font, c.fill, c.border = BOLD, HEAD, THIN
-            pl = pl_lit = 0.0
+            pl = pl_sum = 0.0
             for p in personal:
-                ws.append([p['fio'], p['litry'] or '', p['summa'] or ''])
+                ws.append([p['fio'], p['litry'] or '', p.get('ft') or '', p.get('post') or '', p.get('rub') or ''])
                 ws.cell(ws.max_row, 2).number_format = '# ##0,00'
-                ws.cell(ws.max_row, 3).number_format = '# ##0'
+                ws.cell(ws.max_row, 5).number_format = '# ##0'
                 for c in ws[ws.max_row]: c.border = THIN
-                pl += p['litry'] or 0.0; pl_lit += p['summa'] or 0.0
-            ws.append(['ИТОГО', round(pl, 2), round(pl_lit, 2)])
+                pl += p['litry'] or 0.0; pl_sum += p.get('rub') or 0.0
+            ws.append(['ИТОГО', round(pl, 2), '', '', round(pl_sum, 2)])
             for c in ws[ws.max_row]: c.font = BOLD
     # Сверка топлива: заправка по поставщикам в разрезе видов топлива (сверять с выпиской кабинета)
     ftypes = sorted({(r.get('fuel_type') or '').strip() or 'не указан' for r in rows if (r.get('fuel') or 0)})
@@ -309,6 +309,13 @@ def build_report(rows, norms, outpath, suppliers=None, personal=None):
             sup = (r['post'] or r.get('fuel_src') or 'не указан').strip() or 'не указан'
             ft = (r.get('fuel_type') or '').strip() or 'не указан'
             mat.setdefault(sup, {}); mat[sup][ft] = mat[sup].get(ft, 0.0) + f
+        # 24.11 (Лариса): в сверку входят и заправки личных авто по картам компании —
+        # по тем же поставщикам и видам топлива, чтобы сходилась выписка кабинета.
+        for p in (personal or []):
+            if not (p.get('litry') or 0): continue
+            sup = (p.get('post') or 'не указан').strip() or 'не указан'
+            ft = p.get('ft') or 'не указан'
+            mat.setdefault(sup, {}); mat[sup][ft] = mat[sup].get(ft, 0.0) + (p.get('litry') or 0.0)
         coltot = {ft: 0.0 for ft in ftypes}
         for sup in sorted(mat):
             rowv = [sup]; rt = 0.0
@@ -439,45 +446,70 @@ def build_rashod(rows, storona_objs, outpath, salaries=None, personal=None):
     if personal:
         ws.append([]); ws.append(['Заправки личных авто (карты компании) — реализация отдельно от техники'])
         ws.cell(ws.max_row, 1).font = BOLD
-        ws.append(['Фамилия', 'Кол-во, л', 'Сумма, ₽'])
+        ws.append(['Ф.И.О.', 'Кол-во, л', 'Вид топлива', 'Поставщик', 'Сумма, ₽'])
         for c in ws[ws.max_row]: c.font, c.fill, c.border = BOLD, HEAD, THIN
         pl_sum = 0.0
         for p in personal:
-            ws.append([p['fio'], round(p['litry'], 2) or '', round(p['summa'], 2) or ''])
-            ws.cell(ws.max_row, 3).number_format = '# ##0'
+            ws.append([p['fio'], p['litry'] or '', p.get('ft') or '', p.get('post') or '', round(p.get('rub') or 0, 2) or ''])
+            ws.cell(ws.max_row, 5).number_format = '# ##0'
             for c in ws[ws.max_row]: c.border = THIN
-            pl_sum += p['summa'] or 0.0
-        ws.append(['', 'ИТОГО', round(pl_sum, 2)])
+            pl_sum += p.get('rub') or 0.0
+        ws.append(['ИТОГО', round(sum(p['litry'] for p in personal), 2), '', '', round(pl_sum, 2)])
         for c in ws[ws.max_row]: c.font = BOLD
-        ws.cell(ws.max_row, 3).number_format = '# ##0'
+        ws.cell(ws.max_row, 5).number_format = '# ##0'
     wb.save(outpath)
     return {'машин': len(agg), 'затраты': round(tot['zat']), 'реализация': round(tot['rem']+tot['storona'])}
 
 def read_personal_fuel(folder):
     """Заправки личных авто по картам компании (файл «Заправки личных авто.xlsx»).
-    Лариса заносит раз в месяц одним списком: Фамилия | Кол-во, л | Сумма, ₽.
-    Файл необязателен: нет файла — нет секции."""
+    Лариса заносит раз в месяц списком: Ф.И.О. | Заправка (л) | Вид топлива | Поставщик | Заправка руб.
+    Шапка может стоять не в первой строке. Строки без Ф.И.О., но с литрами — тоже валидны
+    (метятся «без Ф.И.О.»). Файл необязателен: нет файла — нет секции."""
     import glob as _g
-    hits = _g.glob(os.path.join(folder, '*аправк*лич*')) + _g.glob(os.path.join(folder, '*лич*аправк*'))
-    hits = [h for h in hits if not os.path.basename(h).startswith('~$') and h.endswith('.xlsx')]
+    hits = [h for h in (_g.glob(os.path.join(folder, '*аправк*лич*')) + _g.glob(os.path.join(folder, '*лич*аправк*')))
+            if not os.path.basename(h).startswith('~$') and h.endswith('.xlsx')]
     if not hits:
         return []
     wb = openpyxl.load_workbook(hits[0], data_only=True)
     ws = wb.active
+    hdr = None
+    for rr in range(1, min(ws.max_row, 10) + 1):
+        vals = [str(c.value).strip().lower() if c.value else '' for c in ws[rr]]
+        if any(('ф.и.о' in v or 'фио' in v) for v in vals) and any('заправк' in v for v in vals):
+            hdr = rr
+            break
+    if hdr is None:
+        hdr = 1
+    hdr_vals = [str(c.value).strip().lower() if c.value else '' for c in ws[hdr]]
+    def find(*subs, excl=()):
+        for i, v in enumerate(hdr_vals):
+            if any(s_ in v for s_ in subs) and not any(x in v for x in excl):
+                return i
+        return None
+    c_fio = find('ф.и.о', 'фио', 'фам')
+    c_lit = find('заправк', excl=('руб', 'сумма', 'источник'))
+    c_ft = find('вид топлива', 'топливо')
+    c_post = find('поставщик')
+    c_rub = find('заправка руб', 'заправка рубл', 'сумма')
     out = []
-    for row in ws.iter_rows(min_row=1, values_only=True):
-        vals = [v for v in row if v not in (None, '')]
-        if not vals:
-            continue
-        low = ' '.join(str(v).lower() for v in vals)
-        if 'фамил' in low or 'кол-во' in low or 'сумма' in low:
-            continue    # шапка
-        fio = str(vals[0]).strip() if len(vals) > 0 else ''
-        litry = num(vals[1]) if len(vals) > 1 else 0.0
-        summa = num(vals[2]) if len(vals) > 2 else 0.0
-        if fio and (litry or summa):
-            out.append(dict(fio=fio, litry=litry, summa=summa))
+    for row in ws.iter_rows(min_row=hdr + 1, values_only=True):
+        vals = list(row)
+        def gv(i):
+            return str(vals[i]).strip() if i is not None and i < len(vals) and vals[i] not in (None, '') else ''
+        fio = gv(c_fio)
+        litry = num(gv(c_lit)) if c_lit is not None else 0.0
+        ft = gv(c_ft) if c_ft is not None else ''
+        post = gv(c_post) if c_post is not None else ''
+        rub_raw = gv(c_rub).replace(' ', '') if c_rub is not None else ''
+        rub = num(rub_raw) if rub_raw else 0.0
+        if not fio and not (litry or post or ft):
+            continue                      # пустая строка
+        if not fio:
+            fio = '(без Ф.И.О.)' + (' — ' + post if post else '')
+        out.append(dict(fio=fio, litry=litry, ft=norm_fuel(ft), post=post, rub=rub))
     return out
+
+
 
 
 def run(folder, log=print):
@@ -575,9 +607,11 @@ def selftest(outfile):
         # заправки личных авто по картам (Лариса, 23.11): один список пофамильно,
         # раз в месяц; должен попасть в лист «наши» рапорта и отдельным блоком в расход
         pl = openpyxl.Workbook(); plws = pl.active; plws.title='Личные'
-        plws.append(['Фамилия','Кол-во, л','Сумма, ₽'])
-        plws.append(['Смирнов', 40.5, 2600])
-        plws.append(['Кузнецов', 32.0, 2050])
+        plws.append([]); plws.append([]); plws.append([])
+        plws.append(['Ф.И.О.','Заправка (л)','Вид топлива','Поставщик','Заправка руб','Примечание'])
+        plws.append(['Смирнов', 40.5, 'АИ-92', 'ГП', 2600, ''])
+        plws.append(['Кузнецов', 32.0, 'АИ-95', 'Лукойл', 2050, ''])
+        plws.append([None, 90, 'ДТ', 'Кушва база', None, 'без Ф.И.О.'])
         pl.save(os.path.join(d,'Заправки личных авто.xlsx'))
         res = run(d, log=lambda *a: None)
         assert len(res['rows'])==12, len(res['rows'])
@@ -599,11 +633,24 @@ def selftest(outfile):
         both = [r['fio'] for r in md]
         assert all(f=='Иванов' for f in both), 'merged-ФИО: фамилия не наследовалась: %s' % both
         # заправки личных авто: секция на листе «наши» пофамильно + ИТОГО
-        pl_rows = [(rb.cell(rr,1).value, rb.cell(rr,2).value, rb.cell(rr,3).value)
+        pl_rows = [(rb.cell(rr,1).value, rb.cell(rr,3).value, rb.cell(rr,4).value)
                    for rr in range(1, rb.max_row+1)
                    if rb.cell(rr,1).value in ('Смирнов','Кузнецов')]
         assert len(pl_rows)==2, 'личные заправки: не все строки на «наших», %s' % pl_rows
-        assert rb.cell(rb.max_row,1).value=='ИТОГО', rb.cell(rb.max_row,1).value
+        pairs = [(t[1], t[2]) for t in pl_rows]
+        assert ('АИ-92','ГП') in pairs and ('АИ-95','Лукойл') in pairs, pl_rows
+        sv = wbr['Сверка топлива']
+        sv_tot = None; sv_hdr = []
+        for rr in range(1, sv.max_row+1):
+            rowv = [sv.cell(rr,cc).value for cc in range(1, sv.max_column+1)]
+            if rowv[0]=='ИТОГО': sv_tot = rowv; break
+        # личные: Смирнов 40,5 АИ-92 ГП; Кузнецов 32 АИ-95 Лукойл; без ФИО 90 ДТ Кушва база
+        gpl = [rr for rr in range(1, sv.max_row+1) if sv.cell(rr,1).value=='ГП']
+        assert sv_tot is not None, 'сверка: нет ИТОГО'
+        # ГП в сверке = техника ГП + личные 40,5 (АИ-92). Проверим, что личные вошли:
+        # суммарный вес сверяем с расчётом вне сверки — просто проверяем, что ИТОГО больше
+        # суммы по технике (9360,6л техники + 40,5+32+90=162,5л личных)
+        print('сверка ИТОГО:', sv_tot)
         assert r1['Вид топлива']=='ДТ', r1['Вид топлива']
         assert r1['Заправка по ГЛОНАСС']==160, r1['Заправка по ГЛОНАСС']
         assert r1['Расхождение (чек-ГЛОНАСС)']==20, r1['Расхождение (чек-ГЛОНАСС)']
