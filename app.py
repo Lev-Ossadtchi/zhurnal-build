@@ -5,7 +5,7 @@
 v4 (фидбек диспетчера 22.10): затраты свободными строками (сумма+наименование, как внесли),
 реализация по умолчанию на объекты РЭМ, итого по каждой машине в рапорте, колонки поставщиков
 строятся из реальных значений. Листы единой записи бывают разной структуры — читаем по названиям."""
-import os, sys, glob, datetime, re, openpyxl
+import os, sys, glob, datetime, re, openpyxl, shutil
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -722,6 +722,71 @@ def selftest(outfile):
     with open(outfile,'w',encoding='utf-8') as f: f.write(msg)
     print(msg)
 
+
+
+# ================= АВТОСОХРАНЕНИЕ В ОБЛАКО =================
+CLOUD_FILE = 'cloud_dir.txt'   # путь папки автосохранения, хранится рядом с программой
+
+def read_cloud_dir():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)), CLOUD_FILE)
+        if os.path.exists(p):
+            d = open(p, encoding='utf-8').read().strip()
+            return d if d and os.path.isdir(d) else None
+    except Exception:
+        pass
+    return None
+
+def save_cloud_dir(d):
+    p = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)), CLOUD_FILE)
+    open(p, 'w', encoding='utf-8').write(d)
+
+def sync_to_cloud(folder, log=lambda *a: None, ask=False):
+    """Копирует результаты (рапорт, выписки, книги) в папку автосохранения.
+    Диск недоступен/ошибка — файлы остаются локально, дожим при следующем запуске (очередь .cloud_pending).
+    ask=True (первый запуск в GUI) — показать диалог выбора папки и сохранить путь."""
+    cloud = read_cloud_dir()
+    if not cloud and ask:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog, messagebox
+            root = build_gui()
+            d = filedialog.askdirectory(title='Выберите папку автосохранения (например, папку Яндекс.Диска «Укрытие»)')
+            root.destroy()
+            if d:
+                save_cloud_dir(d); cloud = d
+        except Exception:
+            pass
+    if not cloud:
+        return 'папка автосохранения не настроена'
+    files = [os.path.join(folder, f) for f in ('Рапорт (собран).xlsx', 'Расход-реализация (собран).xlsx')]
+    ok, fails = 0, []
+    try:
+        os.makedirs(cloud, exist_ok=True)
+        for f in files:
+            if not os.path.exists(f):
+                continue
+            shutil.copy2(f, os.path.join(cloud, os.path.basename(f)))
+            ok += 1
+        # сброс очереди недоставленных
+        pend = os.path.join(folder, '.cloud_pending')
+        if os.path.exists(pend):
+            for line in open(pend, encoding='utf-8'):
+                pf = line.strip()
+                if pf and os.path.exists(pf):
+                    shutil.copy2(pf, os.path.join(cloud, os.path.basename(pf)))
+                    ok += 1
+            os.remove(pend)
+        return 'в облако отправлено файлов: %d' % ok
+    except Exception as e:
+        pend = os.path.join(folder, '.cloud_pending')
+        with open(pend, 'w', encoding='utf-8') as fh:
+            for f in files:
+                if os.path.exists(f):
+                    fh.write(f + '\n')
+        return 'не удалось отправить в облако (%s) — файлы сохранены локально, отправятся при следующем запуске' % e
+
+
 def build_gui():
     """Поднимает окно выбора папки; возвращает root. Для самопроверки exe (PyInstaller
     теряет модули, подгружаемые по имени — tkinter проверяем явно)."""
@@ -751,6 +816,10 @@ def main():
             print(text)
     try:
         res = run(folder, log=lambda *a: None)
+        try:
+            cloud_msg = sync_to_cloud(folder, ask=gui)
+        except Exception as ce:
+            cloud_msg = 'ошибка облака: %s' % ce
         n = len(res['rows']); rst = res.get('rstats', {})
         if n == 0:
             show('Общий журнал',
@@ -761,9 +830,10 @@ def main():
              'Готово.\n\nОбработано строк: %d\nМашин в расходе: %s, реализация: %s руб\n\n'
              'Создано в этой папке, рядом с программой:\n  Рапорт (собран).xlsx\n  '
              'Расход-реализация (собран).xlsx\n\n'
+             'Автосохранение в облако: %s\n\n'
              'В Расход-реализация затраты выводятся так, как внесены в единую запись (статья и сумма), '
              'плюс Итого затрат по машине. Реализация по умолчанию идёт на объекты РЭМ.'
-             % (n, rst.get('машин'), rst.get('реализация')))
+             % (n, rst.get('машин'), rst.get('реализация'), cloud_msg))
     except PermissionError as pe:
         fn = os.path.basename(getattr(pe, 'filename', '') or '') or 'Рапорт (собран).xlsx'
         show('Общий журнал',
