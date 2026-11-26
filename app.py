@@ -746,12 +746,25 @@ def sync_to_cloud(folder, log=lambda *a: None, ask=False):
     Диск недоступен/ошибка — файлы остаются локально, дожим при следующем запуске (очередь .cloud_pending).
     ask=True (первый запуск в GUI) — показать диалог выбора папки и сохранить путь."""
     cloud = read_cloud_dir()
+    if not cloud:
+        # автоопределение стандартной папки Яндекс.Диска + подпапка «Укрытие»
+        import os as _os
+        home = _os.path.expanduser('~')
+        for cand in (_os.path.join(home,'YandexDisk'), _os.path.join(home,'ЯндексДиск'), _os.path.join(home,'Yandex Disk')):
+            if _os.path.isdir(cand):
+                cloud = _os.path.join(cand, 'Укрытие')
+                try:
+                    _os.makedirs(cloud, exist_ok=True)
+                    save_cloud_dir(cloud)
+                except Exception:
+                    cloud = None
+                break
     if not cloud and ask:
         try:
             import tkinter as tk
-            from tkinter import filedialog, messagebox
+            from tkinter import filedialog
             root = build_gui()
-            d = filedialog.askdirectory(title='Выберите папку автосохранения (например, папку Яндекс.Диска «Укрытие»)')
+            d = filedialog.askdirectory(title='Яндекс.Диск не найден — выберите папку автосохранения вручную')
             root.destroy()
             if d:
                 save_cloud_dir(d); cloud = d
