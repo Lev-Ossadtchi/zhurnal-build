@@ -747,10 +747,16 @@ def sync_to_cloud(folder, log=lambda *a: None, ask=False):
     ask=True (первый запуск в GUI) — показать диалог выбора папки и сохранить путь."""
     cloud = read_cloud_dir()
     if not cloud:
-        # автоопределение стандартной папки Яндекс.Диска + подпапка «Укрытие»
-        import os as _os
+        # автоопределение папки Яндекс.Диска: профиль пользователя + корни всех дисков
+        import os as _os, string as _string
         home = _os.path.expanduser('~')
-        for cand in (_os.path.join(home,'YandexDisk'), _os.path.join(home,'ЯндексДиск'), _os.path.join(home,'Yandex Disk')):
+        names = ('YandexDisk','ЯндексДиск','Yandex Disk','Яндекс Диск','Yandex.Disk','Yandex.Disk2')
+        cands = [_os.path.join(home, n) for n in names]
+        for letter in _string.ascii_uppercase:
+            root = letter + ':\\'
+            if _os.path.isdir(root):
+                cands.extend(_os.path.join(root, n) for n in names)
+        for cand in cands:
             if _os.path.isdir(cand):
                 cloud = _os.path.join(cand, 'Укрытие')
                 try:
@@ -773,23 +779,55 @@ def sync_to_cloud(folder, log=lambda *a: None, ask=False):
     if not cloud:
         return 'папка автосохранения не настроена'
     files = [os.path.join(folder, f) for f in ('Рапорт (собран).xlsx', 'Расход-реализация (собран).xlsx')]
+    import time as _t
+    def _robust_copy(src, dst):
+        # Яндекс.Диск может держать файл занятым во время своей синхронизации:
+        # 3 ретрая, затем копия во временное имя и атомарная замена.
+        last = None
+        for _ in range(3):
+            try:
+                shutil.copy2(src, dst); return True
+            except PermissionError as e:
+                last = e; _t.sleep(1.5)
+        try:
+            tmp = dst + '.new'
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            return True
+        except Exception as e:
+            last = e
+            try:
+                if os.path.exists(tmp): os.remove(tmp)
+            except Exception: pass
+        if last: raise last
+        return False
     ok, fails = 0, []
     try:
         os.makedirs(cloud, exist_ok=True)
         for f in files:
             if not os.path.exists(f):
                 continue
-            shutil.copy2(f, os.path.join(cloud, os.path.basename(f)))
-            ok += 1
+            if _robust_copy(f, os.path.join(cloud, os.path.basename(f))):
+                ok += 1
         # сброс очереди недоставленных
         pend = os.path.join(folder, '.cloud_pending')
         if os.path.exists(pend):
+            left = []
             for line in open(pend, encoding='utf-8'):
                 pf = line.strip()
                 if pf and os.path.exists(pf):
-                    shutil.copy2(pf, os.path.join(cloud, os.path.basename(pf)))
-                    ok += 1
-            os.remove(pend)
+                    try:
+                        if _robust_copy(pf, os.path.join(cloud, os.path.basename(pf))):
+                            ok += 1
+                    except Exception:
+                        left.append(pf)
+                elif pf:
+                    left.append(pf)
+            if left:
+                with open(pend, 'w', encoding='utf-8') as fh:
+                    fh.write('\n'.join(left) + '\n')
+            else:
+                os.remove(pend)
         return 'в облако отправлено файлов: %d' % ok
     except Exception as e:
         pend = os.path.join(folder, '.cloud_pending')
